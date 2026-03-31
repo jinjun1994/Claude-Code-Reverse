@@ -54,18 +54,31 @@ If you are a relevant rights holder and believe any content in this repository a
 ##  architecture in /note 
 
 computer-use-implementation-architecture.md
+
 tool-system-architecture.md
+
 agent-team-architecture.md
+
 tool-call-loop-architecture.md
+
 turn-loop-architecture.md
+
 full-system-architecture.md
+
 mcp-integration-architecture.md
+
 cli-and-routing-architecture.md
+
 README.md
+
 hooks-and-automation-architecture.md
+
 config-auth-and-settings-architecture.md
+
 permissions-and-safety-architecture.md
+
 plugin-and-marketplace-architecture.md
+
 memory-system-architecture.md
 
 ## agent-team-architecture
