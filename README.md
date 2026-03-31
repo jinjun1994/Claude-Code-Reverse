@@ -50,3 +50,53 @@ If you are not certain that you have proper authorization for a given action, do
 
 If you are a relevant rights holder and believe any content in this repository affects your copyright, trademark rights, trade secrets, or other lawful rights or interests, please contact the maintainer or open an issue. After verification, the maintainer is willing to remove, modify, or take down the relevant content.
 
+
+##  architecture in /note 
+
+computer-use-implementation-architecture.md
+tool-system-architecture.md
+agent-team-architecture.md
+tool-call-loop-architecture.md
+turn-loop-architecture.md
+full-system-architecture.md
+mcp-integration-architecture.md
+cli-and-routing-architecture.md
+README.md
+hooks-and-automation-architecture.md
+config-auth-and-settings-architecture.md
+permissions-and-safety-architecture.md
+plugin-and-marketplace-architecture.md
+memory-system-architecture.md
+
+## agent-team-architecture
+
+```mermaid
+flowchart TD
+    USER[用户] --> LEAD[主线程 / 团队负责人]
+    LEAD --> APPSTATE[应用状态：teamContext、已创建团队列表]
+
+    LEAD --> TEAMCREATE[TeamCreate 创建团队]
+    TEAMCREATE --> TEAMROOT[团队目录]
+    TEAMCREATE --> CONFIG[config.json<br/>name description createdAt leadAgentId leadSessionId members]
+    TEAMCREATE --> TASKDIR[任务目录 + 锁机制初始化]
+
+    CONFIG --> DISCOVER[读取配置与成员发现]
+    TASKDIR --> TASKSCHEMA[任务 schema<br/>id subject description activeForm owner status blocks blockedBy metadata]
+    TASKSCHEMA --> CLAIM[任务认领逻辑（含锁文件）]
+
+    LEAD --> AGENTTOOL[Agent 工具拉起 worker]
+    AGENTTOOL --> TEAMMATECTX[注入 teammate 上下文]
+    TEAMMATECTX --> BACKENDS[运行后端：in_process / tmux / iTerm]
+    BACKENDS --> TEAMMATE[teammate runner]
+
+    TEAMMATE --> MAILBOX[SendMessage / teammate-message 通道]
+    MAILBOX --> LEAD
+    LEAD --> MAILBOX
+
+    TEAMMATE --> PERMSYNC[权限请求同步]
+    PERMSYNC --> LEAD
+
+    TEAMMATE --> IDLE[TeammateIdle / TaskCompleted 通知]
+    LEAD --> TEAMDELETE[TeamDelete 删除团队]
+    TEAMDELETE --> CLEANUP[检查活跃成员后执行清理]
+```
