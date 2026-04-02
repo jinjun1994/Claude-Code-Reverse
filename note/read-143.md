@@ -2,9 +2,78 @@
 
 本文档是 142 篇架构文档的索引和总览，覆盖 198 个架构站点。
 
+## 顶层模块地图
+
+为了避免只按站点号线性阅读，建议先把整套笔记理解成 4 个顶层模块：
+
+| 模块 | 核心问题 | 优先文档 |
+|------|----------|----------|
+| **启动与入口** | Claude Code 如何从进程启动进入可运行会话？ | `read.md`、`read-28~35.md`、`read-142.md` |
+| **控制面与运行时** | 配置、权限、工具执行、Query 主循环如何拼成一次真实调用？ | `read-98.md`、`read-126.md`、`read-130.md`、`read-137.md`、`read-139.md`、`read-141.md` |
+| **扩展面与协作** | MCP、Plugin、Memory、Agent Team、Bridge、Transport 如何接入并协同？ | `read-71~80.md`、`read-81~85.md`、`read-86~100.md`、`read-135.md`、`read-136.md`、`read-146.md` |
+| **架构总览与阅读路径** | 不按文件顺推时，怎样建立整套系统脑图？ | `read.md`、`read-138.md`、`read-142.md`、`read-143.md`、`read-146.md` |
+
+`read.md` 现在负责“总入口导读”，而本文件负责“完整架构索引与覆盖矩阵”。两者配合使用：
+
+- `read.md`：适合第一次进入语料时建立主问题意识
+- `read-143.md`：适合回头做模块化索引、交叉跳读与架构收束
+
 ## 阅读顺序建议
 
-按以下 4 个阶段阅读，每阶段 2-4 篇文档：
+### 先按模块读
+
+#### 模块 1：启动与入口
+
+先建立全局术语、启动链与主入口理解。
+
+| 文档 | 站点 | 核心内容 |
+|------|------|----------|
+| `read.md` | 1-27 | 早期总站笔记，建立 main/init/commands/query 主链路 |
+| `read-28` 到 `read-35` | 34-41 | CLI 入口、main.tsx 编排、init 初始化 |
+| `read-142` | 195-198 | Entrypoints、commands、constants、UI 组件完整图 |
+| `read-135 (156)` | 156 | Ink 框架、Store 架构、REPL 组件 |
+
+#### 模块 2：控制面与运行时
+
+理解一次 API 调用从配置、权限、工具到 query 收束的完整生命周期。
+
+| 文档 | 站点 | 核心内容 |
+|------|------|----------|
+| `read-98` | 98 | Bash 安全与校验链 |
+| `read-126` | 135-142 | 工具执行管线、权限运行时、Hook、Turn Loop |
+| `read-130` | 149 | Compact 系统（4 种压缩层级） |
+| `read-137` | 168-171 | Query 模块、Context Providers、Analytics、VCR/Testing |
+| `read-139` | 178-183 | Scheduler/Cron、Shutdown、Shell、文件缓存 |
+| `read-141` | 189-194 | Betas、Fast Mode、Thinking/Effort、Session State |
+
+#### 模块 3：扩展面与协作
+
+理解 Claude Code 如何向外扩展，并支持多智能体与远程协同。
+
+| 文档 | 站点 | 核心内容 |
+|------|------|----------|
+| `read-71` 到 `read-80` | 71-80 | MCP 集成架构 |
+| `read-81` 到 `read-85` | 81-85 | Plugin 和 Marketplace |
+| `read-86` 到 `read-100` | 86-100 | Memory + Agent Team |
+| `read-135` | 155-158 | Bridge、Remote、UI、Voice、Diagnostics |
+| `read-136` | 159-167 | Buddy、Coordinator、Skill、Migrations、Keybindings |
+| `read-146` | 201 | Transport 层完整架构 |
+
+#### 模块 4：架构总览与阅读路径
+
+适合回头做跨模块收束，把系统从“很多站”还原成“几条骨架”。
+
+| 文档 | 站点 | 核心内容 |
+|------|------|----------|
+| `read.md` | 1-27 | 新总入口：启动链与阅读方式 |
+| `read-138` | 173-177 | 中后段系统综合与最终总结 |
+| `read-142` | 195-198 | 入口与 UI 完整图 |
+| `read-143` | 索引文档 | 阅读顺序、覆盖矩阵、关键设计决策 |
+| `read-146` | 201 | Transport 收尾补图 |
+
+### 再按阶段读
+
+如果你更习惯时间线式推进，可以继续按以下 4 个阶段阅读。
 
 ### 阶段 1：总览 + 启动链
 
@@ -55,38 +124,40 @@
 
 ## 子系统覆盖矩阵
 
-| 子系统 | 覆盖文档 | 关键站点 |
-|--------|----------|----------|
-| **启动 + CLI** | read-28~35, read-142 | 34-41, 195-198 |
-| **Bootstrap 状态** | read-131 | 150-151 |
-| **类型系统** | read-132 | 152 |
-| **工具系统** | read-42~60 | 42-60 |
-| **权限系统** | read-61~70, read-138 | 61-70, 175 |
-| **Hook 系统** | read-136, read-138 | 162, 175 |
-| **Query 循环** | read-137 | 168 |
-| **Compact 系统** | read-130 | 149 |
-| **Forked Agent** | read-131 | 150 |
-| **API 层** | read-133 | 153 |
-| **MCP** | read-71~80 | 71-80 |
-| **Plugin/Marketplace** | read-81~85 | 81-85 |
-| **Memory 系统** | read-86~90, read-138 | 86-90, 173 |
-| **Agent Team** | read-91~100, read-138 | 91-100, 174 |
-| **Auth + Config** | read-135, read-141 | 157, 189-194 |
-| **Settings Sync** | read-134 | 154 |
-| **Bridge/Remote** | read-135 | 155 |
-| **UI/Ink** | read-135, read-142 | 156, 195-198 |
-| **Tips/Prompt Suggestion** | read-134 | 154 |
-| **Voice** | read-135 | 158 |
-| **Diagnostics** | read-135 | 158 |
-| **Analytics** | read-137 | 170 |
-| **Keybindings** | read-136 | 166 |
-| **VCR/Testing** | read-137 | 171 |
-| **Scheduler/Cron** | read-139 | 178 |
-| **Graceful Shutdown** | read-139 | 179 |
-| **Shell 引擎** | read-139 | 181 |
-| **文件缓存** | read-139 | 182-183 |
-| **Collapse/Streaming** | read-140 | 185 |
-| **Profiling** | read-140 | 187 |
+| 子系统 | 模块归属 | 覆盖文档 | 关键站点 |
+|--------|----------|----------|----------|
+| **总入口导读** | 架构总览与阅读路径 | `read.md`, `read-143` | 1-27, 索引 |
+| **启动 + CLI** | 启动与入口 | read-28~35, read-142 | 34-41, 195-198 |
+| **Bootstrap 状态** | 控制面与运行时 | read-131 | 150-151 |
+| **类型系统** | 控制面与运行时 | read-132 | 152 |
+| **工具系统** | 控制面与运行时 | read-42~60 | 42-60 |
+| **权限系统** | 控制面与运行时 | read-61~70, read-138 | 61-70, 175 |
+| **Hook 系统** | 控制面与运行时 | read-136, read-138 | 162, 175 |
+| **Query 循环** | 控制面与运行时 | read-137 | 168 |
+| **Compact 系统** | 控制面与运行时 | read-130 | 149 |
+| **Forked Agent** | 扩展面与协作 | read-131 | 150 |
+| **API 层** | 控制面与运行时 | read-133 | 153 |
+| **MCP** | 扩展面与协作 | read-71~80 | 71-80 |
+| **Plugin/Marketplace** | 扩展面与协作 | read-81~85 | 81-85 |
+| **Memory 系统** | 扩展面与协作 | read-86~90, read-138 | 86-90, 173 |
+| **Agent Team** | 扩展面与协作 | read-91~100, read-138 | 91-100, 174 |
+| **Auth + Config** | 控制面与运行时 | read-135, read-141 | 157, 189-194 |
+| **Settings Sync** | 控制面与运行时 | read-134 | 154 |
+| **Bridge/Remote** | 扩展面与协作 | read-135 | 155 |
+| **UI/Ink** | 启动与入口 | read-135, read-142 | 156, 195-198 |
+| **Tips/Prompt Suggestion** | 控制面与运行时 | read-134 | 154 |
+| **Voice** | 扩展面与协作 | read-135 | 158 |
+| **Diagnostics** | 扩展面与协作 | read-135 | 158 |
+| **Analytics** | 控制面与运行时 | read-137 | 170 |
+| **Keybindings** | 扩展面与协作 | read-136 | 166 |
+| **VCR/Testing** | 控制面与运行时 | read-137 | 171 |
+| **Scheduler/Cron** | 控制面与运行时 | read-139 | 178 |
+| **Graceful Shutdown** | 控制面与运行时 | read-139 | 179 |
+| **Shell 引擎** | 控制面与运行时 | read-139 | 181 |
+| **文件缓存** | 控制面与运行时 | read-139 | 182-183 |
+| **Collapse/Streaming** | 控制面与运行时 | read-140 | 185 |
+| **Profiling** | 控制面与运行时 | read-140 | 187 |
+| **Transport** | 扩展面与协作 | read-146 | 201 |
 
 ---
 

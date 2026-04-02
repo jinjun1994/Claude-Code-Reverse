@@ -414,6 +414,25 @@ between our initial snapshot and this callback registration
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站把 ALS context、dynamicTeamContext 与其他身份来源统一收口成一套 teammate helper API。上层由此不必反复判断自己到底是 in-process teammate、process-based teammate 还是 lead。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果没有这层门面，身份解析逻辑会在系统里多处复制。每个模块都知道一点点规则，最后整体反而没人真正说得清。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题是，多来源身份信息如何被统一解释。facade 的价值就在于把“我是谁”的读取顺序制度化。
+
+
 ### 读完这一站后，你应该抓住的 9 个事实
 
 1. `teammate.ts` 不是新的身份来源，而是把 ALS teammate context、dynamic runtime context、teamContext/env 统一收口成一组通用 helper 的门面层。

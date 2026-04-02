@@ -163,6 +163,24 @@ const permissionSetupModule = feature('TRANSCRIPT_CLASSIFIER')
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站负责把 plan 模式的产出正式提交出来，并据此恢复到进入前的权限状态。三种审批路径、`prePlanMode` 恢复和 circuit breaker 防御，说明它关心的是“计划被谁批准、批准后回到哪里”。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果退出 plan 只是简单回 default，之前从 auto 或其他模式进入的上下文就会被粗暴抹平。更危险的是，若不经审批直接出 plan，计划阶段就失去了存在意义。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题是，规划与执行之间怎样完成一次制度化交接。ExitPlanModeTool 把这条交接线画出来，让计划不只是说完，而是被接纳后才转入行动权限。
+
 ### 读完后应抓住的 5 个事实
 
 1. **三种批准路径**：非 teammate（TUI 确认）、teammate 需要批准（mailbox 提交）、teammate 不需要批准（直接退出）。ExitPlanMode 根据 `isTeammate()` 和 `isPlanModeRequired()` 决定走哪条路径。

@@ -634,6 +634,24 @@ hide distributed permission choreography behind a local async decision boundary
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站关心的是，当 ask 发生在 swarm worker 上时，本地待审批工具调用为何必须被正式上抛给 leader。它把一条工具权限流改写成 worker→leader 请求，再把结果接回原 Promise。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果 worker 不经过专门 handler 就直接走本地交互，swarm 的控制权就会分裂。leader 失去统一审批位点，worker 也无法稳定表现为受控执行者。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题，是多 agent 系统里权限主权应当落在哪一层。这个文件给出的答案很明确：执行可分散，审批必须可汇聚。
+
 ### 读完这一站后，你应该抓住的 10 个事实
 
 1. `swarmWorkerHandler.ts` 是 ask-mode 权限路径里的 worker->leader 审批 handler，不是通用 permission handler，只在 agent swarms 启用且当前是 swarm worker 时接管。

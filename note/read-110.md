@@ -193,6 +193,24 @@ function buildMcpToolName(serverName: string, toolName: string): string {
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站的关键不在具体某个 MCP 工具，而在提供一个薄适配模板，让外部 server 暴露的工具能被动态挂进 Claude Code。名称覆写、注解映射、URL elicitation retry 和结果规范化，体现的是“运行时接入”的架构思路。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果每个 MCP 工具都写成内置特例，扩展性会立刻塌掉，新 server 每加一种能力都要改核心代码。那会把 MCP 从协议变回硬编码插件清单。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题是，宿主系统如何给未知外部能力留出统一接入口。MCPTool 的价值正在于它几乎什么都不做，却让大量外部工具以同一种方式被理解和治理。
+
 ### 读完后应抓住的 5 个事实
 
 1. **MCPTool 是一个动态适配模板，不是具体工具**——MCPTool.ts 本身几乎没有功能。真正的 MCP 工具在 `fetchToolsForClient()` 中由 MCP server 的 `tools/list` 响应动态构建。每个 MCP 工具通过 spread MCPTool 获得基类，然后覆盖 name、schema、description、call 等属性。这是为了让 Claude Code 能运行任何 MCP 服务器暴露的工具，而不需要为每个工具编写专门代码。

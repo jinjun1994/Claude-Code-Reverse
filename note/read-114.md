@@ -130,6 +130,24 @@ readFileState.set(fullPath, {
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站的关键是承认 `.ipynb` 不是普通文本，而是单元格结构。replace、insert、delete 三种模式，以及对 cell ID、版本差异和 JSON 缓存污染的处理，都说明 notebook 必须被按对象而不是按字符串编辑。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果继续用 FileEditTool 直接替换 notebook 文本，最先受伤的就是 cell 边界、执行状态和 JSON 完整性。那样看似复用了一套编辑工具，实际却把结构化文档当成脆弱纯文本。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：再往上看，这一站讨论的是“非代码文件中的程序结构”该怎样被 AI 正确操作。NotebookEditTool 代表了一种态度：格式特殊，就该拥有专门语义。
+
 ### 读完后应抓住的 4 个事实
 
 1. **NotebookEditTool 操作单元格级别而非整个文件**——与 FileEditTool 的 `old_string`/`new_string` 文本替换不同，它解析 notebook 的 JSON 结构，直接修改 `cells` 数组中的 cell 对象。这让模型可以做单元格的插入、删除、替换而不会破坏 notebook 格式。

@@ -691,6 +691,25 @@ mailbox-based control/message protocol
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站把 tmux/iTerm2 这类 pane backend 包装成统一的 `TeammateExecutor`。它把“开 pane、发命令、kill pane”翻译成“spawn teammate、sendMessage、terminate、isActive”等上层生命周期语义。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果 pane host 细节直接暴露给上层，tmux 和 iTerm2 的差异会迅速渗透到业务代码。适配器缺失后，多后端统一只是口号。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题是，底层宿主能力如何升格为平台级生命周期接口。adapter 模式在这里不是形式，而是必要桥梁。
+
+
 ### 读完这一站后，你应该抓住的 10 个事实
 
 1. `PaneBackendExecutor.ts` 是把 `PaneBackend` 适配成 `TeammateExecutor` 的正式 adapter，不是简单工具函数集合。

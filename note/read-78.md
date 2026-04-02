@@ -189,6 +189,24 @@ registerStructuredOutputEnforcement(
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站关心的是，prompt hook 和 agent hook 共享的那些原语为什么不能散落在执行器里。通用响应 schema、`$ARGUMENTS` 展开、structured output 工具和强制输出 hook，本质上是同一套验证基础设施。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果这些共享逻辑各写一份，prompt/agent 两条路线就会逐渐漂移。最先失去一致性的，不是功能，而是“什么叫合法 hook 结果”这件事。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题，是相似扩展路径怎样共享同一组低层原语。辅助层的意义，正是在重复还没变坏之前先把它收束掉。
+
 ### 读完这一站后，你应该抓住的 5 个事实
 
 1. `hookResponseSchema` 定义 `{ ok: boolean, reason?: string }` 的通用验证响应 schema，被 prompt hooks 和 agent hooks 共用。

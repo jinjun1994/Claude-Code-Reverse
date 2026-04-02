@@ -152,6 +152,24 @@ Remote: { status: 'remote_launched', taskId, sessionUrl }
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站真正要回答的是，子代理为什么会成为整个工具系统里最复杂的单体工具。因为它不是单一路径执行器，而是同步、异步、worktree、fork、teammate 和 remote 等多条路线的总路由器。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果这些路线没有被收束在 AgentTool，一个“调用子代理”动作就会在不同模式下表现成完全不同的工具。那样表面上像拆分复杂度，实际是把复杂度扔给整个平台。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题，是宿主怎样把“代理调用”当作一个工具，同时又允许它内部拥有自己的世界。AgentTool 展示的是工具平台向 agent 平台过渡时的边界形态。
+
 ### 读完这一站后，你应该抓住的 6 个事实
 
 1. AgentTool 是工具子系统中最复杂的工具（1300+ 行），管理六条不同的执行路径：teammate spawn、remote isolation、fork sync、normal sync backgrounded、async-from-start、force-async。

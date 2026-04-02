@@ -108,6 +108,24 @@ type CacheSafeParams = {
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站把 forked agent 与全局 bootstrap state 放在一起，核心在于子代理怎样既隔离上下文，又共享 prompt cache。`CacheSafeParams`、默认隔离与选择性共享说明，这不是普通并发，而是对缓存与状态边界都极其敏感的并行。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果子代理完全复制父状态，缓存会失稳；若完全重建一切，又会失去共享收益和一致消息前缀。最麻烦的是 readFileState 这类看似局部的状态，一旦处理错就会把 cache 命中率打碎。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题是，同进程多代理系统如何做到“脑子分开，记忆前缀共用”。150 站给出的答案很克制：默认隔离，只在少数必要点共享，这恰恰是稳定性的来源。
+
 ### 读完后应抓住的 4 个事实
 
 1. **Cache 共享需要五字段匹配**——`CacheSafeParams`（systemPrompt/userContext/systemContext/toolUseContext/forkContextMessages）必须在父子请求间完全相同。任何不同都导致 cache miss。在 fork 上设置 `maxOutputTokens` 会被警告——它改变 `budget_tokens` 从而改变 thinking config。
@@ -159,6 +177,24 @@ HooksSchema (top-level: event → matcher[])
 3. 运行时层：`types/hooks.ts`（回调、进度等内存类型）
 
 ---
+
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站的核心不是 Hook 配置写成几层 Zod，而是把 `settings/types.ts` 与 `plugins/schemas.ts` 之间的循环依赖切开。`lazySchema`、四层嵌套结构和可 JSON 化的持久化层，说明它承担的是“让 Hook 配置能被安全定义、延迟求值、稳定复用”的职责。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果没有这一层，Hook schema 会散落在设置、插件、运行时类型之间，互相引用时很容易在加载期就炸掉。像 HTTP header 只允许 `allowedEnvVars` 插值、禁止 `.transform()` 这类安全与一致性约束，也会失去统一落点。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：再往外看，这一站在回答的是“系统如何长期承载 24+ Hook 生命周期事件而不让配置模型失控”。它讨论的不是某个 schema 文件，而是配置语言、验证边界与运行时类型之间怎样长期共存。
 
 ### 读完后应抓住的 2 个事实
 

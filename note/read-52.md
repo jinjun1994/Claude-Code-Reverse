@@ -632,6 +632,24 @@ PaneBackend abstraction 统一了接口，
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站真正关心的，是 iTerm2 native split pane 为什么也要落实成正式 `PaneBackend`，而不是当成 tmux 的降级附庸。它展示的是一条依赖 `it2` CLI 与 session ID 链的独立宿主路线。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果不把 iTerm2 路线单独收束成 backend，所有 split、定位、发命令逻辑都会和 tmux 假设缠在一起。那样一来，能力弱边界不清，后面只会不断补特判。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：背后更大的问题，是系统怎样在不同终端宿主上维持同一套 swarm 协作语义。iTermBackend 让我们看到，抽象一致不等于能力等价，接口必须容纳宿主差异。
+
 ### 读完这一站后，你应该抓住的 10 个事实
 
 1. `ITermBackend.ts` 是 swarm 在 iTerm2 上的正式 `PaneBackend` 实现，通过 `it2` CLI 驱动 native split panes。

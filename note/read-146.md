@@ -92,6 +92,24 @@ StructuredIO (SDK protocol bridge)
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站真正要回答的是：**Claude Code 一旦跨出本地进程，消息到底怎样才能可靠地发出去、收回来、保持顺序，并在中断后继续活着。** 所以这里讲的不是某个 WebSocket 类怎么写，而是整个 Transport 层为什么必须独立：WebSocketTransport 负责连接生命周期，HybridTransport 处理读写分离，SerialBatchEventUploader 解决并发写冲突，StructuredIO 则把这些通信细节接回 Claude Code 自己的协议世界。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果反过来做，不单独建立 Transport 层，而让上层业务自己关心重连、批量写入、消息去重、stdout 排队，那最先失控的就是时序。Bridge mode 的并发写冲突、sleep 之后的重连预算、`control_request` 和 `stream_event` 的先后关系，都会变成局部补丁。通信问题最可怕的地方就在这里：平时像细节，出事时却会一起爆。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：跳出这些 transport 实现之后，更大的问题其实是：**一个会话型 AI 系统，怎样跨进程、跨网络、跨协议地持续保持“像同一个会话”那样工作。** 具体传输方式以后可以变，但可靠传输、顺序保证、恢复能力和协议桥接，永远都会是远程 Claude Code 的基础问题。
+
 ### 读完后应抓住的 3 个事实
 
 1. **HybridTransport 的写序列化解决并发写冲突**——Bridge mode 的 `void transport.write()` fire-and-forget 导致并发 Firestore 文档写冲突。`SerialBatchEventUploader` 保证最多 1 POST 在飞行，事件排队等待。这是生产级修复——来自真实的 oncall 重试风暴事件。

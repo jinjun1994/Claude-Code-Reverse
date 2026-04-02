@@ -71,6 +71,24 @@ const onHookSuccess = hook.once
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站真正要解释的是，skill frontmatter hooks 为什么需要一条独立注册路径。除了普通 session 注册，它还承接了 `once: true` 的一次性清理和 `skillRoot` 这类 skill 来源信息。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果 skill hooks 直接复用普通 frontmatter 流程，最先丢掉的就是执行后自动移除这类 skill 特性。那样 skill hook 虽然能跑，却失去“临时只生效一次”的设计初衷。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题，是不同来源的 hook 怎样共享基础设施又保留自己的语义。这里看到的是“同一注册框架，来源特性单独承载”的做法。
+
 ### 读完这一站后，你应该抓住的 3 个事实
 
 1. skill hooks 支持 `once: true`，执行成功后通过 `onHookSuccess` 回调自动从 session store 移除。

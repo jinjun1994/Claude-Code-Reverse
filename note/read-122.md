@@ -86,6 +86,24 @@ Enter worktree 后必须清除所有依赖 CWD 的缓存：
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站把创建 worktree 从 Git 命令提升为会话级隔离操作，重点在 session 绑定、slug 安全和缓存切换。它不是单纯开个分支副本，而是让整个 Claude Code 状态一起搬进新的工作现场。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果只靠手写 `git worktree add`，CWD、memory cache、system prompt sections 和 plan 目录缓存都不会自动同步。结果就是代码在新树里，系统脑子却还留在旧目录。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题是，AI 修改代码时能否拥有真正隔离的工作空间，而不只是表面换个路径。EnterWorktreeTool 的价值，在于把“隔离”从 Git 层推进到会话层。
+
 ### 读完后应抓住的 3 个事实
 
 1. **Worktree 与 session 绑定**——EnterWorktreeTool 创建的 worktree 被 session tracking 系统管理。`getCurrentWorktreeSession()` 只返回当前 session 创建的 worktree。这防止 ExitWorktreeTool 操作由 `git worktree add` 创建的 worktree。
@@ -219,6 +237,24 @@ A silent 0/0 would let cleanupWorktree destroy real work.
 这是关键的安全哲学：当无法确定 worktree 状态时（git 命令失败），拒绝删除而不是假设安全。静默的 0/0 会让 `cleanupWorktree` 销毁真实的工作。
 
 ---
+
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站关注的是 worktree 会话怎样安全结束，尤其在 keep 与 remove 间做出有信息的选择。`countWorktreeChanges()` fail-closed、恢复原始 CWD 与 hooks 配置，说明退出本身也是需要保护用户工作成果的操作。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果删除 worktree 时把“不确定”当成“没变化”，就会在 Git 状态异常时直接吞掉真实工作。短期看是流畅，长期看却是在用清理便利交换数据安全。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题是，隔离工作区何时该被回收，何时该被保留。ExitWorktreeTool 的保守设计提醒我们，清理动作在开发系统里从来不是低风险尾声。
 
 ### 读完后应抓住的 4 个事实
 

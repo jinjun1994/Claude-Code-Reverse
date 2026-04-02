@@ -469,6 +469,25 @@ useSwarmPermissionPoller = 接收端 + continuation 恢复器
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站负责 worker 侧接收 leader 权限回包，并通过模块级 callback registry 把异步响应接回原始 ask promise。关键不是轮询本身，而是 continuation table。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果没有 `requestId -> callback` 这张表，leader 的回包回来了也不知道该恢复哪条权限流程。跨 agent ask 就会断在“请求发出后”的半空。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题是，异步分布式响应怎样重新接回本地控制流。轮询只是表象，真正重要的是 continuation 的保存与恢复。
+
+
 ### 读完这一站后，你应该抓住的 8 个事实
 
 1. `useSwarmPermissionPoller.ts` 的核心不是 React hook，而是 permission/sandbox 回包的 registry + dispatcher。

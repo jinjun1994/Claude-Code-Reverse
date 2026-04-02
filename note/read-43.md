@@ -673,6 +673,25 @@ registry.ts 管的是 session/global 级别决策
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站把 tmux、iTerm2、in-process 等 backend 的检测、注册、缓存和统一执行接口收口到 registry。它让上层面对的不是具体宿主差异，而是稳定的 `TeammateExecutor` 接口。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果 backend 选择逻辑散落在 spawn 点、cleanup 点和 UI 点，系统会反复重测环境并出现不一致。抽象失位后，后端差异会不断泄漏到上层。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题是，平台如何在多种执行介质之间保持统一 teammate 语义。registry 就是这种抽象稳定器。
+
+
 ### 读完这一站后，你应该抓住的 10 个事实
 
 1. `registry.ts` 是 swarm teammate backend 的统一解析与分发中枢，不是具体 backend 实现文件。

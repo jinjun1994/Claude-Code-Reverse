@@ -625,6 +625,24 @@ TmuxBackend.ts = 把 tmux 从“能执行命令的终端复用器”提升成“
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站的元问题，是为什么 swarm 需要一层专门的 tmux 宿主实现，而不是把 pane 操作散在 executor 或 registry 里。读完会看到，它真正承接的是建 pane、发命令、调布局、做 hide/show 这些宿主能力本身。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果反过来做，把 inside-tmux、outside-tmux、pane 竞态与 leader 锚点逻辑拆散到别处，tmux 路线会立刻失去统一边界。结果不是更灵活，而是更难保证 pane 创建、复用和重平衡的一致性。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题不是 tmux 命令怎么拼，而是多 agent 协作系统怎样把“终端宿主能力”抽象成可替换后端。TmuxBackend 的价值，就在于它把 swarm 对窗格宿主的要求显式化了。
+
 ### 读完这一站后，你应该抓住的 10 个事实
 
 1. `TmuxBackend.ts` 是 swarm 在 tmux 上的正式 `PaneBackend` 实现，负责 pane 宿主能力而不是 teammate lifecycle 或 backend 选择。

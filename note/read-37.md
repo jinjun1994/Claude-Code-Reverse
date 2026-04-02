@@ -301,6 +301,25 @@ in-process teammate 的真正核心实现仍然在 runner / task / shared AppSta
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站是 in-process teammate 的最小状态桥接工具集，专门负责 `agentName -> taskId` 转换、plan approval 状态更新和 permission-related response 识别。它有意保持很薄。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果这些小桥接不被抽出来，上层代码就会不断手搓 task 遍历和消息判断。久而久之，小逻辑反而最容易到处复制。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题是，少量但高频的跨层转换该放在哪里。独立 helper 往往比塞进大流程里更能保持系统清爽。
+
+
 ### 读完这一站后，你应该抓住的 6 个事实
 
 1. `inProcessTeammateHelpers.ts` 不是完整执行框架，而是 in-process teammate 与共享 AppState 之间的轻量桥接工具集。

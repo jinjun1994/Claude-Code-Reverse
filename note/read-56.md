@@ -758,6 +758,24 @@ useSwarmPermissionPoller.ts = swarm worker 侧的权限等待恢复中枢：把 
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站关心的是，worker 发起权限请求后，挂起的 continuation 到底在哪里等 leader 的回复。它把“等待审批”从抽象 Promise 变成了本地可注册、可恢复的 callback registry。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果不单独维护这层挂起恢复机制，权限请求发出去以后就只剩消息，没有执行上下文。那样 leader 回答再准确，也接不回原来的工具调用。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题，是分布式审批怎样把“异步决定”重新接回“正在执行的本地调用栈”。这正是 continuation bridge 这类设计长期要回答的事。
+
 ### 读完这一站后，你应该抓住的 10 个事实
 
 1. `useSwarmPermissionPoller.ts` 不是权限判定器，而是 worker 侧等待 leader 审批结果时的 continuation registry 与恢复层。

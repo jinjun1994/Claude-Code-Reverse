@@ -375,6 +375,25 @@ in-process teammate 先是“本地任务对象”
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站把 in-process teammate 明确定义成一种特殊 task type，并把 request shutdown、append message、inject user message 等状态操作收在这里。它是任务壳层，不是运行内核。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果 in-process teammate 不走统一 task 接口，管理和展示都会变成特判。生命周期操作也会失去统一入口。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题是，特殊协作者如何以标准对象的形式被平台接纳。task adapter 是一种很典型的制度化方式。
+
+
 ### 读完这一站后，你应该抓住的 8 个事实
 
 1. `InProcessTeammateTask.tsx` 的核心作用是把 in-process teammate 纳入 Task 系统，而不是直接承载完整 runner 逻辑。

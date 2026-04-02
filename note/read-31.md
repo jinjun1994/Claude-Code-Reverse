@@ -223,6 +223,25 @@ coordinatorHandler 的目标不是“必须自动化成功”，
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站突出 coordinator worker 的产品策略：hooks first、classifier second、interactive last。它虽然短，却明确规定了 ask 在这一角色下的处理顺序。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果 coordinator 不做 automated-first，而和 main agent 完全同路，很多自动化 worker 的收益就会被抵消。用户会被更多本可避免的确认打断。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题是，权限流程是否应按执行角色区分策略。系统一旦出现多角色 agent，答案基本就是必须区分。
+
+
 ### 读完这一站后，你应该抓住的 6 个事实
 
 1. `coordinatorHandler.ts` 不是交互处理器，而是 coordinator worker 的自动化前置处理器。

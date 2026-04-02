@@ -597,6 +597,25 @@ isActive = task.status + AbortController signal
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站是 in-process teammate 的正式 backend 实现，说明 in-process 不是旁路 hack，而是与 tmux、iTerm2 并列的一等后端。它用本地 task、ALS 和 AbortController 去兑现同一份 `TeammateExecutor` 合同。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果把 in-process 当成临时特判，上层迟早要知道一堆本地细节。只有把它视为正式 backend，registry 才能真正统一分发。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题是，执行承载方式不同，是否还能共享同一生命周期抽象。这里的设计明确表明可以，而且值得这样做。
+
+
 ### 读完这一站后，你应该抓住的 10 个事实
 
 1. `InProcessBackend.ts` 是 in-process teammate 的正式 `TeammateExecutor` 实现，不是特殊旁路代码。

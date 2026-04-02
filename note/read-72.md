@@ -668,6 +668,24 @@ sessionHooks.ts = session hooks 的运行时注册与投影层：负责以 sessi
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站真正要说明的是，session-scoped hooks 为什么要单独有一套内存注册中心。它不仅保存普通 session hooks，还把 runtime-only 的 function hooks 纳入同一 session 视角。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果没有这层，session 生命周期内临时注册的 hooks 就只能塞进全局配置或零散状态。那样既破坏持久化边界，也让按 session 清理和投影变得困难。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题，是系统怎样同时支持持久化 hook 与纯运行态 hook。`sessionHooks.ts` 给出的答案，是在 session 维度上建立一套独立存储语义。
+
 ### 读完这一站后，你应该抓住的 10 个事实
 
 1. `src/utils/hooks/sessionHooks.ts` 不是 persisted hooks 配置层，而是 session-scoped hooks 的内存态注册与管理层。

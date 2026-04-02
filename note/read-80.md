@@ -79,6 +79,24 @@ plugin registered hooks (extension-scoped)
 
 ---
 
+### 元
+
+问题：**这一站真正想解决的架构问题是什么？**
+
+回答：这一站关心的是，文件级 frontmatter 里的 hooks 为什么不能直接让 runtime 自己到处读，而要先注册成 session-scoped hooks。它把静态声明转成会话内可消费的内存态规则，并处理 agent 场景下的事件映射。
+
+### 反
+
+问题：**如果把这一站的设计反过来，会发生什么？**
+
+回答：如果 frontmatter hooks 不经注册桥直接散入执行层，文件来源、session 生命周期和 event 变换都会混在一起。这样一来，agent 特有的 Stop/SubagentStop 语义也会越来越难维护。
+
+### 空
+
+问题：**跳出当前文件名，这一站背后更大的问题是什么？**
+
+回答：更大的问题，是声明式配置怎样进入运行时而不泄漏来源细节。注册桥的作用，就是把“来自文件”转换成“属于当前会话”。
+
 ### 读完这一站后，你应该抓住的 4 个事实
 
 1. `registerFrontmatterHooks.ts` 只有 67 行，纯粹的前端配置 -> session hooks 注册桥。
