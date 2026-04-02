@@ -357,3 +357,621 @@ const tool = {
 **工具名规范化**——`normalizeNameForMCP()` 将所有非 `[a-zA-Z0-9_-]` 字符替换为下划线。这是为了防止工具名中的特殊字符在 `mcp__server__tool` 命名约定中引起解析问题。
 
 **描述长度限制**——`MAX_MCP_DESCRIPTION_LENGTH = 2048`。MCP 服务器可能返回任意长的工具描述，截断到 2048 字符防止 prompt 爆炸。
+
+---
+
+## 10.11 OAuth 认证全链路
+
+MCP 的 OAuth 流是整个系统中最复杂的部分——9 步发现 + 3 种 token 交换模式 + 刷新 + 撤销。这是 RFC 9728（OAuth 2.0 Protected Resource Metadata）和 RFC 8414（Authorization Server Metadata）的双重实现。
+
+```mermaid
+sequenceDiagram
+    participant CC as Claude Code
+    participant MCP as MCP Server
+    participant AuthZ as Authorization Server
+    participant Browser as User Browser
+    participant Keychain as Secure Storage
+
+    CC->>MCP: 401 未授权
+    MCP-->>CC: WWW-Authenticate header
+    CC->>MCP: GET /.well-known/oauth-protected-resource
+    MCP-->>CC: authorization_server URL
+    CC->>AuthZ: GET /.well-known/oauth-authorization-server
+    AuthZ-->>CC: metadata (token_endpoint, authorization_endpoint)
+    CC->>CC: 创建 ClaudeAuthProvider
+    CC->>Browser: 打开授权 URL (state=csrf_token)
+    Browser->>AuthZ: 用户授权
+    AuthZ->>CC: redirect → callback port
+    CC->>AuthZ: POST token_endpoint (authorization_code)
+    AuthZ-->>CC: access_token + refresh_token
+    CC->>Keychain: 存储 mcpOAuth[serverKey]
+    CC->>AuthZ: refresh_token 到期前刷新
+```
+
+**XAA（Cross-App Access）**——对于企业级 SSO 环境，`performMCPXaaAuth`（`auth.ts:664-845`）实现了 SEP-990：
+1. 获取 IdP 的 id_token（缓存或 OIDC 浏览器登录）
+2. 发现 IdP 的 token endpoint
+3. 运行 RFC 8693 + RFC 7523 token 交换（无需浏览器）
+4. Token 存储到相同的 keychain slot
+5. 一次 IdP 登录可在所有 XAA 服务器间复用
+
+这是"单一身份认证→多 MCP 服务器复用"的模型，显著降低了企业环境中的认证摩擦。
+
+**Token 存储键设计**——`mcpOAuth[serverKey]` 的 key 是 `serverName|sha256(config_json)[:16]`。SHA-256 + 截断到 16 位是一个经验平衡——太短会导致哈希碰撞，太长会浪费 keychain 空间。16 位（64 bits）碰撞概率约 2^(-32)，可接受。
+
+---
+
+## 10.12 六种 Transport 详解
+
+| Transport | 实现 | 特点 | 适用场景 |
+|-----------|------|------|---------|
+| **stdio** | `StdioClientTransport` | 子进程，支持 `CLAUDE_CODE_SHELL_PREFIX` 包装 | 本地工具服务器 |
+| **SSE** | `SSEClientTransport` | EventSource 长连接，不支持 timeout 包装 | 远程事件流 |
+| **HTTP (Streamable)** | `StreamableHTTPClientTransport` | 每个请求独立的 60s timeout，`Accept: application/json, text/event-stream` | 远程 HTTP API |
+| **WebSocket** | 自定义 `WebSocketTransport` | Bun 原生或 Node `ws`，协议 `['mcp']` | 双向实时通信 |
+| **claudeai-proxy** | `createClaudeAiProxyFetch` | 通过 Anthropic 代理，OAuth bearer 重试 | 企业 CCR 环境 |
+| **In-process** | `createLinkedTransportPair` | 无子进程，~325MB 节省，双向通信 | Chrome MCP, Computer Use |
+
+**Stdio 子进程的优雅关闭**（`client.ts:1404-1570`）：
+```
+SIGINT → 等待 100ms → SIGTERM → 等待 400ms → SIGKILL
+整个流程 600ms  failsafe，中间用 process.kill(pid, 0) 检测进程是否存活
+```
+
+这是逐级加力的策略——SIGINT 允许进程保存状态，SIGTERM 强制结束，SIGKILL 作为最后手段。600ms 是一个经验值——足够完成状态清理，但不长到阻塞用户。
+
+**In-process Transport 的意义**——Chrome MCP 和 Computer Use 不需要子进程。`createLinkedTransportPair` 在进程内创建一对通信端点，一端作为 server，另一端作为 client。这节省了 ~325MB（Node.js + Chrome 的内存开销），同时也避免了 IPC 延迟。
+
+**动态 Headers**（`headersHelper.ts:32-80`）——MCP 服务器配置可以指定 `headersHelper` 脚本路径，该脚本动态产生 HTTP headers。安全约束：
+- 项目/本地配置需要用户信任对话框确认
+- 服务器名称和 URL 通过环境变量 `CLAUDE_CODE_MCP_SERVER_NAME`/`CLAUDE_CODE_MCP_SERVER_URL` 传递
+- 脚本无法访问进程的完整环境变量
+
+---
+
+## 10.13 企业策略：MCP 服务器的双重门控
+
+企业策略对 MCP 服务器实施**双重门控**——denylist 优先，allowlist 过滤。
+
+### Denylist（`config.ts:364-408`）
+
+三种匹配模式：
+```typescript
+// 1. 名称匹配
+{ serverName: "dangerous-server" }
+
+// 2. 命令匹配（精确比较命令数组）
+{ command: ["npx", "-y", "@dangerous/package"] }
+
+// 3. URL 匹配（通配符模式）
+{ url: "https://*.malicious.com/*" }
+```
+
+### Allowlist（`config.ts:417-508`）
+
+关键行为：**空 allowlist = 阻止所有服务器**。这不是"默认允许"，而是"默认拒绝"。
+
+```typescript
+// getMcpAllowlistSettings() 读取策略配置
+if (allowManagedMcpServersOnly) {
+  // 只允许管理配置中的服务器
+  // 用户手动添加的服务器被忽略
+}
+```
+
+### 企业独占控制（`config.ts:650-655`）
+
+当 `doesEnterpriseMcpConfigExist()` 返回 true 时：
+- `addMcpConfig` 抛出异常："enterprise MCP configuration is active and has exclusive control"
+- claude.ai 配置拉取被跳过（`useManageMCPConnections.ts:860-863`）
+- 用户无法手动添加或删除服务器
+
+这是"平台即真理"的模式——企业管理员通过 `managed-mcp.json` 完全控制 MCP 生态。
+
+---
+
+## 10.14 MCP 工具发现与转换
+
+**`fetchToolsForClient`（`client.ts:1743-1998`）** 是 LRU 缓存的 memoized 函数（最大 20 个条目）：
+
+```typescript
+// 1. 发送 {method: 'tools/list'} 到服务器
+// 2. 转换每个 MCP 工具为内部 Tool 格式
+// 3. 名前缀: mcp__<normalized_server>__<tool_name>
+// 4. 注释: readOnlyHint, destructiveHint, openWorldHint, title
+// 5. 元数据: _meta['anthropic/searchHint'], _meta['anthropic/alwaysLoad']
+```
+
+**MCPTool 的 scaffold 模式**（`MCPTool.ts:1-77`）：
+```typescript
+// 基础 MCPTool 只是一个空壳
+{
+  isMcp: true,
+  maxResultSizeChars: 100_000,
+  checkPermissions: () => 'passthrough',  // 权限由服务器级控制
+}
+// 实际的方法（name, description, call, prompt）在发现时被覆盖
+```
+
+**工具列表变更通知**——当服务器发送 `tools/list_changed` 通知时：
+1. 缓存中的 `fetchToolsForClient` 条目被无效化
+2. 重新获取工具列表
+3. 旧工具从 appState 中移除
+4. 新工具添加到 appState
+5. 记录 `tengu_mcp_list_changed` 分析事件
+
+---
+
+## 10.15 错误处理与自动重连
+
+### 自定义错误类（`client.ts:152-186`）
+
+| 错误类 | 触发条件 | 后果 |
+|--------|---------|------|
+| `McpAuthError` | 401 | 服务器状态转为 `needs-auth`，显示认证工具 |
+| `McpSessionExpiredError` | 404 + JSON-RPC -32001 | 自动重连，重放最后一次工具调用 |
+| `McpToolCallError` | `isError: true` | 返回错误给模型，携带 `_meta` 和 `structuredContent` |
+
+### 指数退避重连（`useManageMCPConnections.ts:354-464`）
+
+```
+退避序列: 1s → 2s → 4s → 8s → 16s
+最大尝试: 5 次
+最大退避: 30 秒 (MAX_BACKOFF_MS)
+触发条件: 3 个连续错误 (MAX_ERRORS_BEFORE_RECONNECT)
+```
+
+状态流转：`connected → pending (重连中) → connected/failed`。
+
+### 输出截断（`mcpValidation.ts:1-208`）
+
+MCP 输出截断有 3 层决策：
+```
+1. MAX_MCP_OUTPUT_TOKENS 环境变量 (最高优先级)
+2. GrowthBook flag tengu_satin_quoll.mcp_tool (中等优先级)
+3. 硬编码默认 25000 tokens (默认)
+```
+
+使用 API token 计数（非字符计数）进行精确估算。截断后通知模型使用分页。二进制内容持久化到磁盘，不进入上下文窗口。
+
+### needs-auth 状态的自动恢复
+
+当服务器进入 `needs-auth` 状态时，MCP Auth Tool（`McpAuthTool.ts:1-215`）替换真实工具。当模型调用此伪工具时：
+1. 启动 `performMCPOAuthFlow`，`skipBrowserOpen: true`
+2. 立即返回授权 URL
+3. 后台完成认证
+4. 认证成功后自动重连服务器
+
+这允许 MCP 服务器在无人值守的情况下恢复认证。
+
+---
+
+## 10.16 CCR 代理中的 MCP 服务器
+
+对于 CCR（Claude Code Remote）环境，MCP 服务器 URL 通过 `mcp_url` 查询参数包装。`unwrapCcrProxyUrl`（`config.ts:171-212`）提取原始供应商 URL，实现基于内容（而非 URL 表示）的去重。
+
+这使得即使插件配置和连接器配置有不同的 URL 表示，也能指向相同的基础服务器，防止重复连接。
+
+---
+
+## 10.17 MCP 与 Plugin 系统的集成
+
+插件可以声明 MCP 服务器配置（`PluginManifest.mcpServers`）。当插件安装时：
+1. MCP 服务器注册到 MCP 系统
+2. 遵循与手动配置相同的安全模型
+3. 企业策略检查
+4. Channel allowlist 验证
+5. OAuth 认证
+
+插件不是特权路径——它必须经过与用户手动添加服务器相同的检查和审批。
+
+---
+
+## 10.18 MCP 资源的二进制处理
+
+`ReadMcpResourceTool`（`ReadMcpResourceTool.ts:1-158`）处理资源时的特殊逻辑：
+1. 对于二进制 blob 内容，解码 base64
+2. 将原始字节写入磁盘，使用 MIME 类型推断扩展名
+3. 用 `blobSavedTo` 路径和用户消息替换 blob 字段
+
+这是关键的安全决策——防止 base64 编码的二进制内容进入上下文窗口，避免大量数据消耗 token 预算。
+
+---
+
+## 10.11 OAuth 完整链路
+
+MCP 的 OAuth 实现遵循 XAA（eXtended Agent Auth）协议：
+
+**Phase 1——元数据发现**：
+1. 如果配置了 `authServerMetadataUrl`，直接获取
+2. 探测 `/.well-known/oauth-authorization-server`（RFC 8414）
+3. 回退到 `/.well-known/oauth-protected-resource`（RFC 9728，受保护资源→授权服务器链）
+4. 最终回退到路径感知的 RFC 8414 直接探测（旧服务器）
+
+**Phase 2——Token 交换**：
+```
+POST /oauth/token
+  grant_type: authorization_code
+  code: <code from callback>
+  redirect_uri: <local callback URL>
+  code_verifier: <PKCE>
+```
+
+**PKCE 流**——MCP OAuth 使用 PKCE（Proof Key for Code Exchange）：
+- `code_challenge` = SHA256(`code_verifier`) 的 Base64URL 编码
+- `code_verifier` 在本地生成为随机字符串
+- 这是防止授权码拦截的关键——即使拦截了码，没有 verifier 也无法交换 token
+
+**Phase 3——Token 刷新**——刷新在 `mcp/oauth-client.ts` 中实现：
+- 在 token 过期前 5 分钟自动刷新
+- 刷新失败回退到重新获取
+
+---
+
+## 10.12 6 种传输协议
+
+MCP 支持 6 种传输类型：
+
+| 传输 | 协议 | 描述 |
+|------|------|------|
+| `stdio` | STDIN/STDOUT | 标准子进程 IPC |
+| `sse` | Server-Sent Events | 服务端推送事件流 |
+| `http` | HTTP POST | 单向 HTTP 请求 |
+| `ws` | WebSocket | 全双工连接 |
+| `sse-ide` | IDE SSE | IDE 集成的 SSE 桥接 |
+| `ws-ide` | IDE WebSocket | IDE 集成的 WS 桥接 |
+
+**SSE 传输**：
+- 客户端监听 SSE 事件流
+- 通过 POST 发送消息到服务端
+- 使用 reconnect URL 实现自动重连
+- SSE 端有 `Last-Event-ID` 支持，确保消息不丢失
+
+**WebSocket 帧格式**——WebSocket 传输使用 JSON 帧：
+```json
+{"jsonrpc": "2.0", "method": "tools/call", "params": {...}, "id": 1}
+```
+
+**HTTP 传输**——简单 POST 模型：每个消息是一个 HTTP 请求，响应在 HTTP response body。无持久连接——适合偶发调用。
+
+---
+
+## 10.13 Enterprise Policy 双重门控
+
+MCP 服务器通过**双重门控**管理——企业策略和用户配置的结合：
+
+**Gate 1——企业策略（MDM/策略设置）**：
+```json
+{
+  "mcpServers": {
+    "allow": ["github", "jira"],
+    "deny": ["internal-db"],
+    "requireApproval": ["filesystem"]
+  }
+}
+```
+
+**Gate 2——用户配置**（`~/.claude/settings.json` 中的 `mcpServers`）：
+
+| 策略配置 | 用户配置 | 结果 |
+|---------|---------|------|
+| `deny` | `allow` | **拒绝**（策略优先） |
+| `allow` | 未设置 | **允许** |
+| `requireApproval` | `allow` | 每次调用前**确认** |
+| 无策略 | `deny` | **允许**（用户选择加入） |
+
+**`mcpServerManager`**——在策略变更后触发服务器重启。当 `config_changed` 事件触发时，管理器：
+1. 比较旧/新配置
+2. 停止不再匹配的服务器
+3. 启动新添加的服务器
+4. 重新注册工具
+
+---
+
+## 10.14 工具发现与转换
+
+**工具发现**——MCP 服务器连接后，Claude Code 调用 `tools/list`：
+```json
+{"jsonrpc": "2.0", "method": "tools/list", "id": 0}
+```
+
+**工具转换**——MCP 工具被转换为 Claude 的内置工具格式：
+```typescript
+mcpToolToToolSpec(mcpTool: MCPTool, serverName: string): ToolSpec {
+  return {
+    name: `mcp__${serverName}__${tool.name}`,
+    description: tool.description,
+    inputSchema: tool.inputSchema,  // JSON Schema → Zod 转换
+  }
+}
+```
+
+**工具取消注册**——服务器断开连接时，所有 `mcp__${serverName}__*` 工具从可用工具池中移除。
+
+**名称冲突处理**——如果 MCP 工具与内置工具名称冲突，MCP 工具使用 `mcp__serverName__toolName` 前缀避免冲突。
+
+---
+
+## 10.15 MCP 错误处理与重连
+
+**MCP 错误分类**：
+
+| 错误类型 | 行为 |
+|---------|------|
+| 连接失败（子进程退出） | 指数退避重连：1s → 2s → 4s → 8s → 16s（最大） |
+| 工具调用失败 | 错误传递给 LLM，LLM 可以选择重试 |
+| OAuth token 过期 | 自动刷新→重试，刷新失败则标记服务器为不可用 |
+| 协议错误（无效 JSON） | 记录并跳过 |
+
+**重连逻辑**（`mcp/transport-reconnect.ts`）：
+1. 尝试 1：快速重连（0ms 延迟）
+2. 尝试 2-3：指数延迟
+3. 尝试 4+：上限 16 秒
+4. 最大重连次数：`MCP_MAX_RECONNECT_ATTEMPTS = 5`
+5. 重连成功后，重新调用 `tools/list` 重新注册工具
+
+**MCP 服务器健康检查**——`ping()` 每 30 秒发送。超时 10 秒的服务器被标记为不健康并从工具池移除。
+
+---
+
+## 10.16 CCR MCP 代理
+
+当 Claude Code Remote (CCR) 连接时，MCP 通过代理路由：
+
+```
+本地 MCP 服务器 → CCR Proxy → 远程 Claude Code 实例 → 工具调用
+```
+
+`mcp/proxy.ts`：
+- 本地 MCP 工具通过 `mcp__*` 前缀标记
+- 远程实例收到工具调用请求后，在远程进程上下文中执行
+- 网络隔离：CCR Proxy 仅转发工具调用消息，不暴露 MCP 服务器的直接连接
+
+---
+
+## 10.17 插件与 MCP 集成
+
+**插件中的 MCP 服务器声明**：
+```json
+{
+  "mcpServers": [
+    {
+      "name": "my-plugin-server",
+      "command": "node",
+      "args": ["plugin-server.js"],
+      "env": { "API_KEY": "${MY_API_KEY}" }
+    }
+  ]
+}
+```
+
+**插件 MCP 安全**——插件安装的 MCP 服务器：
+1. 受 Enterprise Policy 管理（同用户服务器）
+2. 需要用户显式批准启用
+3. `env` 中的 `${VAR}` 语法在启动时扩展
+4. 插件不能注册覆盖内置工具的命令
+
+---
+
+## 10.18 MCP 资源处理
+
+**MCP 资源**——MCP 协议支持资源（不仅是工具）：
+
+```json
+{"jsonrpc": "2.0", "method": "resources/list", "id": 1}
+{"jsonrpc": "2.0", "method": "resources/read", "params": {"uri": "file:///..."}}
+```
+
+**`resources/templates`**——MCP 服务器可声明资源模板（如 `file://{path}`），Claude Code 使用 URI 模式匹配来发现和读取。
+
+**二进制资源处理**——`resources/read` 可能返回 `blob`（二进制）而非 `text`：
+```typescript
+if ('blob' in resource.contents) {
+  // 转换为 Base64 传递到消息管线
+  content = Buffer.from(resource.contents.blob).toString('base64')
+}
+```
+
+**资源限制**——`MAX_MCP_RESOURCE_SIZE = 5 * 1024 * 1024`（5MB）。超过此限制的资源被截断。
+
+---
+
+---
+
+## 10.11 OAuth 完整链路
+
+MCP 的 OAuth 实现遵循 XAA（eXtended Agent Auth）协议：
+
+**Phase 1——元数据发现**：
+1. 如果配置了 `authServerMetadataUrl`，直接获取
+2. 探测 `/.well-known/oauth-authorization-server`（RFC 8414）
+3. 回退到 `/.well-known/oauth-protected-resource`（RFC 9728，受保护资源→授权服务器链）
+4. 最终回退到路径感知的 RFC 8414 直接探测（旧服务器）
+
+**Phase 2——Token 交换**：
+```
+POST /oauth/token
+  grant_type: authorization_code
+  code: <code from callback>
+  redirect_uri: <local callback URL>
+  code_verifier: <PKCE>
+```
+
+**PKCE 流**——MCP OAuth 使用 PKCE（Proof Key for Code Exchange）：
+- `code_challenge` = SHA256(`code_verifier`) 的 Base64URL 编码
+- `code_verifier` 在本地生成为随机字符串
+- 这是防止授权码拦截的关键——即使拦截了码，没有 verifier 也无法交换 token
+
+**Phase 3——Token 刷新**——刷新在 `mcp/oauth-client.ts` 中实现：
+- 在 token 过期前 5 分钟自动刷新
+- 刷新失败回退到重新获取
+
+---
+
+## 10.12 6 种传输协议
+
+MCP 支持 6 种传输类型：
+
+| 传输 | 协议 | 描述 |
+|------|------|------|
+| `stdio` | STDIN/STDOUT | 标准子进程 IPC |
+| `sse` | Server-Sent Events | 服务端推送事件流 |
+| `http` | HTTP POST | 单向 HTTP 请求 |
+| `ws` | WebSocket | 全双工连接 |
+| `sse-ide` | IDE SSE | IDE 集成的 SSE 桥接 |
+| `ws-ide` | IDE WebSocket | IDE 集成的 WS 桥接 |
+
+**SSE 传输**：
+- 客户端监听 SSE 事件流
+- 通过 POST 发送消息到服务端
+- 使用 reconnect URL 实现自动重连
+- SSE 端有 `Last-Event-ID` 支持，确保消息不丢失
+
+**WebSocket 帧格式**——WebSocket 传输使用 JSON 帧：
+```json
+{"jsonrpc": "2.0", "method": "tools/call", "params": {...}, "id": 1}
+```
+
+**HTTP 传输**——简单 POST 模型：每个消息是一个 HTTP 请求，响应在 HTTP response body。无持久连接——适合偶发调用。
+
+---
+
+## 10.13 Enterprise Policy 双重门控
+
+MCP 服务器通过**双重门控**管理——企业策略和用户配置的结合：
+
+**Gate 1——企业策略（MDM/策略设置）**：
+```json
+{
+  "mcpServers": {
+    "allow": ["github", "jira"],
+    "deny": ["internal-db"],
+    "requireApproval": ["filesystem"]
+  }
+}
+```
+
+**Gate 2——用户配置**（`~/.claude/settings.json` 中的 `mcpServers`）：
+
+| 策略配置 | 用户配置 | 结果 |
+|---------|---------|------|
+| `deny` | `allow` | **拒绝**（策略优先） |
+| `allow` | 未设置 | **允许** |
+| `requireApproval` | `allow` | 每次调用前**确认** |
+| 无策略 | `deny` | **允许**（用户选择加入） |
+
+**`mcpServerManager`**——在策略变更后触发服务器重启。当 `config_changed` 事件触发时，管理器：
+1. 比较旧/新配置
+2. 停止不再匹配的服务器
+3. 启动新添加的服务器
+4. 重新注册工具
+
+---
+
+## 10.14 工具发现与转换
+
+**工具发现**——MCP 服务器连接后，Claude Code 调用 `tools/list`：
+```json
+{"jsonrpc": "2.0", "method": "tools/list", "id": 0}
+```
+
+**工具转换**——MCP 工具被转换为 Claude 的内置工具格式：
+```typescript
+mcpToolToToolSpec(mcpTool: MCPTool, serverName: string): ToolSpec {
+  return {
+    name: `mcp__${serverName}__${tool.name}`,
+    description: tool.description,
+    inputSchema: tool.inputSchema,  // JSON Schema → Zod 转换
+  }
+}
+```
+
+**工具取消注册**——服务器断开连接时，所有 `mcp__${serverName}__*` 工具从可用工具池中移除。
+
+**名称冲突处理**——如果 MCP 工具与内置工具名称冲突，MCP 工具使用 `mcp__serverName__toolName` 前缀避免冲突。
+
+---
+
+## 10.15 MCP 错误处理与重连
+
+**MCP 错误分类**：
+
+| 错误类型 | 行为 |
+|---------|------|
+| 连接失败（子进程退出） | 指数退避重连：1s → 2s → 4s → 8s → 16s（最大） |
+| 工具调用失败 | 错误传递给 LLM，LLM 可以选择重试 |
+| OAuth token 过期 | 自动刷新→重试，刷新失败则标记服务器为不可用 |
+| 协议错误（无效 JSON） | 记录并跳过 |
+
+**重连逻辑**（`mcp/transport-reconnect.ts`）：
+1. 尝试 1：快速重连（0ms 延迟）
+2. 尝试 2-3：指数延迟
+3. 尝试 4+：上限 16 秒
+4. 最大重连次数：`MCP_MAX_RECONNECT_ATTEMPTS = 5`
+5. 重连成功后，重新调用 `tools/list` 重新注册工具
+
+**MCP 服务器健康检查**——`ping()` 每 30 秒发送。超时 10 秒的服务器被标记为不健康并从工具池移除。
+
+---
+
+## 10.16 CCR MCP 代理
+
+当 Claude Code Remote (CCR) 连接时，MCP 通过代理路由：
+
+```
+本地 MCP 服务器 → CCR Proxy → 远程 Claude Code 实例 → 工具调用
+```
+
+`mcp/proxy.ts`：
+- 本地 MCP 工具通过 `mcp__*` 前缀标记
+- 远程实例收到工具调用请求后，在远程进程上下文中执行
+- 网络隔离：CCR Proxy 仅转发工具调用消息，不暴露 MCP 服务器的直接连接
+
+---
+
+## 10.17 插件与 MCP 集成
+
+**插件中的 MCP 服务器声明**：
+```json
+{
+  "mcpServers": [
+    {
+      "name": "my-plugin-server",
+      "command": "node",
+      "args": ["plugin-server.js"],
+      "env": { "API_KEY": "${MY_API_KEY}" }
+    }
+  ]
+}
+```
+
+**插件 MCP 安全**——插件安装的 MCP 服务器：
+1. 受 Enterprise Policy 管理（同用户服务器）
+2. 需要用户显式批准启用
+3. `env` 中的 `${VAR}` 语法在启动时扩展
+4. 插件不能注册覆盖内置工具的命令
+
+---
+
+## 10.18 MCP 资源处理
+
+**MCP 资源**——MCP 协议支持资源（不仅是工具）：
+
+```json
+{"jsonrpc": "2.0", "method": "resources/list", "id": 1}
+{"jsonrpc": "2.0", "method": "resources/read", "params": {"uri": "file:///..."}}
+```
+
+**`resources/templates`**——MCP 服务器可声明资源模板（如 `file://{path}`），Claude Code 使用 URI 模式匹配来发现和读取。
+
+**二进制资源处理**——`resources/read` 可能返回 `blob`（二进制）而非 `text`：
+```typescript
+if ('blob' in resource.contents) {
+  // 转换为 Base64 传递到消息管线
+  content = Buffer.from(resource.contents.blob).toString('base64')
+}
+```
+
+**资源限制**——`MAX_MCP_RESOURCE_SIZE = 5 * 1024 * 1024`（5MB）。超过此限制的资源被截断。
+
+---

@@ -340,3 +340,468 @@ export function runPostCompactCleanup(querySource?: QuerySource) {
 ```
 
 **为何在压缩后而非压缩前**——压缩前的状态指的是旧对话的执行轨迹。如果压缩前重置，模型可能在压缩期间仍引用旧状态，导致状态不一致。压缩后重置保证了新旧状态在压缩边界处干净分隔。
+
+
+---
+
+## 6.5 压缩阈值的令牌计算
+
+```typescript
+// autoCompact.ts:33-49
+const effectiveContextWindow = getContextWindowForModel(model) - reservedTokensForSummary
+const reservedTokensForSummary = Math.min(getMaxOutputTokensForModel(model), 20000)
+```
+
+**20,000 的来源**——基于 p99.99 的压缩摘要输出为 17,387 tokens。取 20,000 是合理的上限——99.99% 的摘要不会超过这个大小。
+
+### Auto-Compact 阈值
+
+```typescript
+// autoCompact.ts:72-91
+const AUTOCOMPACT_BUFFER_TOKENS = 13_000
+const autoCompactThreshold = effectiveContextWindow - AUTOCOMPACT_BUFFER_TOKENS
+```
+
+为何是 13,000——这不是随意选择的。上下文窗口中剩余的空间必须足够容纳：下一轮用户输入 + 模型的工具调用 + 工具结果。如果缓冲太小，模型可能在压缩触发后仍超出限制。13,000 确保了即使在最坏情况下（大量工具调用 + 大工具结果），也有足够的空间完成一轮。
+
+### 警告阈值系统
+
+```
+Warning threshold  = threshold - 20,000
+Error threshold     = threshold - 20,000
+Blocking limit      = actualContextWindow - 3,000
+```
+
+**Blocking limit 的 3,000 tokens**——这是手动 `/compact` 的最低空间。即使 auto-compact 失败，用户仍可以通过手动压缩恢复。3,000 tokens 足以渲染 UI 和输入命令。
+
+### 覆盖机制
+
+| 环境变量 | 效果 |
+|---------|------|
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | 上限上下文窗口大小 |
+| `CLAE_AUTO_COMPACT_PCT` | 基于百分比的覆盖 |
+| `CLAUDE_CODE_BLOCKING_LIMIT` | 覆盖阻塞限制 |
+| `DISABLE_COMPACT` | 禁用所有压缩（包括手动 `/compact`） |
+| `DISABLE_AUTO_COMPACT` | 只禁用自动压缩 |
+
+---
+
+## 6.6 压缩算法：摘要、删除、保留
+
+### 压缩摘要的结构
+
+```typescript
+// prompt.ts:61-77
+// AI 被指令生成以下部分的结构化摘要:
+// 1. Primary Request and Intent
+// 2. Key Technical Concepts
+// 3. Files and Code Sections
+// 4. Errors and Fixes
+// 5. Problem Solving
+// 6. All user messages (non-tool)
+// 7. Pending Tasks
+// 8. Current Work
+// 9. Optional Next Step
+```
+
+**`<analysis>` 和 `<summary>` 标签**——AI 被指令将分析草稿放入 `<analysis>` 标签（类似 draft scratchpad），最终摘要放入 `<summary>` 标签。`<analysis>` 块在 `formatCompactSummary()` 中被剥离——用户不会看到模型的推理过程。
+
+### 被清除的内容
+
+| 内容 | 清除方式 | 原因 |
+|------|---------|------|
+| 压缩边界前的所有消息 | 替换为 boundary + summary | 核心压缩语义 |
+| 文件读取缓存 | `context.readFileState.clear()` | 旧的文件读取在摘要中已总结 |
+| `loadedNestedMemoryPaths` | `.clear()` | 内存路径在摘要后无效 |
+
+**为何不保留 Skill names**——注释明确指出：重新注入 `skill_listing`（约 4K tokens）在压缩后的 cache_creation 是纯浪费。Skill 名字被**保留**——不重置。
+
+### 被保留/重新注入的内容
+
+| 内容 | 机制 | Token 预算 |
+|------|------|-----------|
+| 最近访问的文件（最多 5 个） | FileReadTool 重新读取 | 50,000 总上限，每文件 5,000 |
+| Plan 文件 | 如果存在则附加 | - |
+| 已调用的技能 | 最近优先，每技能截断 | 总预算 25,000，每技能 5,000 |
+| Async Agent 状态 | 运行中/已完成的 Agent | - |
+| 工具/Agent/MCP 增量重新通告 | Delta attachments | - |
+| SessionStart hooks | CLAUDE.md 等 | - |
+
+**重新注入的必要性**——压缩后，模型失去了所有历史上下文。如果不重新注入这些内容，模型不知道之前的文件内容是什么、哪些技能已被调用、哪些 Agent 在运行。
+
+---
+
+## 6.7 三种压缩层级的层次结构
+
+```
+Layer 1: API 级上下文管理 (apiMicrocompact.ts)
+  - 服务器端工具/thinking 清除，通过上下文管理 API
+  - 无客户端消息变更
+  - 使用 context management API 的 clear_thinking_20251015 策略
+
+Layer 2: 微压缩 (microCompact.ts)
+  - 缓存 MC: 延迟 cache_edit 块到 API 层（客户端消息不变）
+  - 时间 MC: 直接清除旧工具结果内容（>1h 间隔）
+  - 每次 API 调用前运行
+
+Layer 3: 完整压缩 (compact.ts, autoCompact.ts, sessionMemoryCompact.ts)
+  - Auto-compact: tokens >= effectiveContextWindow - 13,000 时触发
+  - 手动 /compact: 用户发起
+  - 会话内存压缩: 使用 CLAUDE.md 式会话内存作为摘要
+  - Reactive compact: 由 API 提示-过长错误触发（feature-flagged）
+```
+
+### 时间微压缩（Time-Based Micro-Compact）
+
+```typescript
+// microCompact.ts:446-530
+function maybeTimeBasedMicrocompact():
+  // 当自最后一条助手消息以来的间隔超过 gapThresholdMinutes（默认 60 分钟）时触发
+  // 此时服务器缓存已过期，清除旧工具结果可减少重写的字节数
+  // 内容-改变最近 N 个可压缩工具之外的工具结果为
+  // "[Old tool result content cleared]"
+```
+
+**为何 60 分钟**——Prompt cache 的 TTL 通常约 1 小时。如果用户离开会话超过 60 分钟，缓存无论如何都会过期。与其保留大量旧工具结果直到下一轮模型调用（它们会被包含在重写的前缀中），不如现在就清除它们。
+
+### API 级 Thinking 管理
+
+```typescript
+// apiMicrocompact.ts:77-86
+// 默认: 保留所有先前助手轮次中的 thinking 块 (keep: 'all')
+// 缓存过期（>1h 空闲）: 只保留最后一个 thinking 轮次
+// redact_thinking 激活时: 完全跳过（因为 redacted 块无模型可见内容）
+```
+
+**为何缓存过期时只保留最后一个 thinking**——Thinking 块可能非常大（数 K tokens）。如果缓存已过期，保留所有 thinking 只是浪费重写的 token。只保留最后一个 thinking 给模型一些连续的思维轨迹，同时最小化开销。
+
+---
+
+## 6.8 手动 `/compact` vs Auto-Compact 的行为差异
+
+| 方面 | 手动 `/compact` | Auto-Compact |
+|------|----------------|-------------|
+| `suppressFollowUpQuestions` | `false`（摘要后继续对话） | `true`（不询问用户，自动继续） |
+| `customInstructions` | 可由用户提供 | `undefined` |
+| 错误通知 | 显示错误 | 抑制（不干扰用户） |
+| 微压缩 | 在摘要前运行 | 在每轮查询开始时运行 |
+| 断路器 | 无 | 连续 3 次失败后停止 |
+| 前置 hooks | 运行 PreCompact hooks | 运行 PreCompact hooks |
+
+### Auto-Compact 的断路器
+
+```typescript
+const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
+```
+
+连续 3 次 auto-compact 失败后，断路器触发——不再尝试自动压缩。这是防止压缩错误导致无限重试循环。用户仍然可以手动 `/compact`。
+
+**什么是"失败"**——压缩 API 调用返回错误，或压缩提示过长无法恢复。如果 `DISABLE_COMPACT` 或 `DISABLE_AUTO_COMPACT` 设置，压缩根本不运行。
+
+### Auto-Compact 的 `suppressFollowUpQuestions`
+
+```typescript
+// 自动压缩的摘要包括:
+"Continue the conversation from where it left off without asking the user any further questions. Resume directly -- do not acknowledge the summary..."
+```
+
+这防止了压缩后模型输出"A summary of our conversation so far... What would you like to do next?"——这会打扰用户。用户看到的是一个无缝的压缩——模型自动继续工作而不提示。
+
+---
+
+## 6.9 压缩后的消息重建
+
+### Compact Boundary Message
+
+```typescript
+// SystemCompactBoundaryMessage:
+{
+  type: 'system',
+  subtype: 'compact_boundary',
+  compactMetadata: {
+    trigger: 'manual' | 'auto',
+    preTokens: 压缩前token数,
+    preCompactDiscoveredTools: [...],  // 压缩前发现的工具名
+    logicalParentUuid: 指向最后一条消息
+  }
+}
+```
+
+**`preCompactDiscoveredTools` 的意义**——这是一个排序的工具名列表。压缩后，系统需要知道哪些工具在压缩前被加载过。有了这个列表，可以在后续 API 调用中包含正确的工具 schema。否则，如果 MCP 工具在压缩后被"丢失"，模型将无法再调用它们。
+
+### Partial Compact（部分压缩）
+
+```typescript
+// compact.ts:772-1106
+function partialCompactConversation(messages, pivotIndex, direction):
+  // 'from' 方向: 透视点之后的消息做摘要，保留较早的
+  // 'up_to' 方向: 透视点之前的消息做摘要，保留较晚的
+```
+
+**Partial Compact 的两种方向**——`'from'` 保留前缀（early messages），`'up_to'` 保留后缀（recent messages）。`'from'` 方向保留先前压缩的缓存，因为摘要放在后面。`'up_to'` 会使缓存无效，因为摘要在保留的消息之前。
+
+### 压缩时的缓存共享
+
+```typescript
+// compact.ts:1150-1248 (tengu_compact_cache_prefix, 默认 true)
+// runForkedAgent() with same cacheSafeParams:
+// - system prompt, tools, model, messages prefix, thinking config
+// - 不设置 maxOutputTokens（会导致 thinking config 不匹配，使缓存失效）
+```
+
+**为何不设置 maxOutputTokens**——这会 clamp `budget_tokens`，造成 thinking 配置与主对话不同。API 的缓存 key 基于配置参数——任何差异都会导致缓存 miss。
+
+---
+
+## 6.10 API 轮次分组与 Turn 结构保留
+
+```typescript
+// grouping.ts:22-63
+// 消息按 message.id（API 响应 ID）分组
+// 当新的助手响应出现（不同的 message.id）时发生边界分组
+```
+
+**为何不用 "human turn" 分组**——在 Agent 会话中，整个工作负载可能只有一个 human turn。按 API 轮次分组确保每个压缩边界对应一个完整的 model→tool→model 周期。
+
+### 压缩时的 Thinking 块处理
+
+```
+完整压缩 (compactConversation):
+  - 压缩 API 调用: thinking disabled ({ type: 'disabled' })
+  - 被压缩的消息: thinking 块作为输入的一部分传递（不被剥离）
+  - 摘要 AI 读取 thinking 作为上下文，但只输出纯文本 <summary>
+
+微压缩 (apiMicrocompact):
+  - 服务器端: clear_thinking_20251015 策略
+  - 默认保留所有 thinking (keep: 'all')
+  - 缓存过期时只保留最后一个 thinking 轮次
+
+会话内存压缩 (sessionMemoryCompact):
+  - adjustIndexToPreserveAPIInvariants() 特殊处理 thinking 块
+  - 如果保留的助手消息与之前的助手消息共享 message.id
+  - 调整索引以包含这些先前的消息（防止 thinking 块孤立）
+```
+
+**Thinking 块孤立的防范**——当 `normalizeMessagesForAPI` 通过 `message.id` 合并流式消息时，一个助手消息的 thinking 可能与另一个助手消息的文本在同一 ID 下。如果压缩不保留所有关联消息，thinking 块会成为孤立消息（没有配对的响应）。`adjustIndexToPreserveAPIInvariants()` 确保所有 `message.id` 关联的消息被作为一个单元保留。
+
+---
+
+## 6.9 压缩管线分层
+
+Claude Code 实现了分层压缩策略——按成本从低到高执行：
+
+| 层 | 策略 | 成本 | 缓存友好性 |
+|---|------|------|----------|
+| 1 | Session Memory Compaction | 无（复用已提取的事实） | — |
+| 2 | Microcompaction（时间型） | 无（就地清除） | 重置缓存 |
+| 3 | Microcompaction（Cached MC） | 无（cache_edits） | 保留缓存前缀 |
+| 4 | Session Memory Compaction（full） | 1 次 Haiku 调用 | 部分 |
+| 5 | Full Conversation Compaction | 1 次 Sonnet 调用 | 销毁 |
+| 6 | Partial Compaction | 1 次 模型调用 | 取决于方向 |
+
+**关键设计原则**——系统先尝试廉价路径（session memory），如果可行则直接返回，不触发昂贵的 LLM 压缩。
+
+---
+
+## 6.10 Full Conversation Compaction 细节
+
+`compact.ts`（约 1400 行）是核心压缩函数：
+
+**执行管线**：
+1. **Pre-Compact Hooks**——`executePreCompactHooks()` 运行 `pre_compact` 生命周期 hook，可贡献自定义指令和用户可见消息
+2. **生成摘要**——通过 forked agent 或流式回退：
+   - **缓存共享路径（默认）**：`runForkedAgent`，`maxTurns: 1`——复用主对话缓存的 prompt 前缀（系统 prompt + 工具）。由特性标记 `tengu_compact_cache_prefix`（默认 `true`）门控
+   - **流式回退**：`queryModelWithStreaming()`——缓存共享失败时使用
+3. **剥离图像**——`stripImagesFromMessages()` 用 `[image]`/`[document]` 文本标记替换图像/文档块
+4. **剥离 Reinjected Attachment**——`stripReinjectedAttachments()` 过滤 `skill_discovery`/`skill_listing` 附件
+5. **Prompt 超长处理**——`truncateHeadForPTLRetry`——当压缩请求本身就超过限制时，逐步丢弃最旧的 API 轮组，最多重试 `MAX_PTL_RETRIES = 3` 次
+6. **清除文件状态并重新附加**——最近的文件、plans、skills、MCP 工具、agent listing
+7. **创建边界标记**——`createCompactBoundaryMessage('auto'|'manual', preCompactTokenCount, uuid)`
+8. **SessionStart Hooks**——恢复 CLAUDE.md 和上下文文件
+9. **Post-Compact Hooks**——后置清理
+
+**压缩 Prompt**——两阶段结构：
+- **NO_TOOLS_PREAMBLE**：强制执行"仅文本，无工具"
+- **BASE_COMPACT_PROMPT**：9 个段落的详细摘要模板（请求、概念、文件、错误、解决、消息、任务、当前工作、下一步）
+
+**Post-Compact 重建预算**：
+- `POST_COMPACT_MAX_FILES_TO_RESTORE = 5`
+- `POST_COMPACT_TOKEN_BUDGET = 50,000`
+- `POST_COMPACT_MAX_TOKENS_PER_FILE = 5,000`
+- `POST_COMPACT_SKILLS_TOKEN_BUDGET = 25,000`
+
+`createPostCompactFileAttachments` 通过 `FileReadTool` 重新读取最近访问的文件，受文件数量和 token 预算约束。
+
+---
+
+## 6.11 Partial Compaction
+
+`partialCompactConversation()` 支持两种方向模式：
+
+**'from'（前缀保留）**——对 pivot 索引**之后**的消息进行摘要，保留之前的消息。保留消息的 prompt 缓存**不**被销毁。
+
+**'up_to'（后缀保留）**——对 pivot 索引**之前**的消息进行摘要，保留之后的消息。提示摘要在保留消息**之前**，因此 prompt 缓存**被**销毁。
+
+关键差异：`'up_to'` 必须从"保留"集中剥离旧的 compact 边界；`'from'` 则不需要。
+
+---
+
+## 6.12 Auto-Compact 与阈值
+
+`autoCompact.ts` 中的自动压缩触发条件：
+
+```
+AUTOCOMPACT_BUFFER_TOKENS         = 13,000  // 距上下文窗口多远触发自动压缩
+WARNING_THRESHOLD_BUFFER_TOKENS   = 20,000  // 何时显示 UI 警告
+ERROR_THRESHOLD_BUFFER_TOKENS     = 20,000  // 错误级别警告
+MANUAL_COMPACT_BUFFER_TOKENS      =  3,000  // 阻塞上限
+MAX_OUTPUT_TOKENS_FOR_SUMMARY     = 20,000  // 为摘要输出预留
+MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3    // 熔断
+```
+
+**有效上下文窗口**——`getEffectiveContextWindowSize(model)`：
+- `contextWindow - reservedTokensForSummary`
+- 预留 = `min(getMaxOutputTokensForModel(model), 20,000)`
+- `CLAUDE_CODE_AUTO_COMPACT_WINDOW` 环境变量可限制有效上下文窗口
+- `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 可完全覆盖模型上下文窗口
+
+**`shouldAutoCompact()`** 检查：
+- `DISABLE_COMPACT`、`DISABLE_AUTO_COMPACT` 环境变量
+- `userConfig.autoCompactEnabled`
+- 递归守卫——跳过 `querySource === 'session_memory' | 'compact'`
+- 特性标记 `REACTIVE_COMPACT` 和 `CONTEXT_COLLAPSE` 抑制自动压缩
+
+**熔断**——`AutoCompactTrackingState.consecutiveFailures` 连续 3 次失败后，返回 `{ wasCompacted: false }` 并记录警告。成功后重置为 0。
+
+---
+
+## 6.13 Session Memory Compaction
+
+`sessionMemoryCompact.ts` 是实验性方法——使用已累积的 session memory（提取的事实、模式、决策）**作为**摘要，而非请求模型生成：
+
+**配置**（GrowthBook `tengu_sm_compact_config` 获取）：
+- `minTokens = 10,000`——最小 token 数
+- `minTextBlockMessages = 5`——最小文本块消息数
+- `maxTokens = 40,000`——硬上限
+
+**`calculateMessagesToKeepIndex()`**——从 `lastSummarizedIndex + 1`（最后摘要边界之后的消息）开始：
+- 向后扩展直到**任一**条件满足：
+  - `totalTokens >= minTokens (10,000)`**且**`textBlockMessageCount >= minTextBlockMessages (5)`
+  - `totalTokens >= maxTokens (40,000)`
+- 下限：不低于最后压缩边界
+
+**`adjustIndexToPreserveAPIInvariants()`**——确保切片不拆分 tool_use/tool_result 对：
+- 从 startIndex 向后扫描，检查 retained 范围内是否有 tool_result 匹配的 tool_use
+- 同时检查具有相同 `message.id` 的 assistant 消息（保留共享流式 ID 的 thinking 块）
+
+**特性门控**——需要 `tengu_session_memory`**和**`tengu_sm_compact` 同时启用。
+
+---
+
+## 6.14 Microcompaction
+
+三种微压缩策略在管线中执行：
+
+### 时间型 Microcompaction
+`maybeTimeBasedMicrocompact()`——自上次 assistant 消息的空隙超过配置阈值时触发：
+- GrowthBook `tengu_slate_heron` 配置，默认 `{ enabled: false, gapThresholdMinutes: 60, keepRecent: 5 }`
+- 空隙超过 60 分钟时：
+  - 收集所有"可压缩"的 tool result ID
+  - 保留最后 `keepRecent = 5` 个可压缩 tool result
+  - 将较旧的 tool result 内容替换为 `'[Old tool result content cleared]'`
+- **直接突变消息内容**（缓存是冷的）
+
+### Cached Microcompaction
+`cachedMicrocompactPath()`——使用 Anthropic API `cache_edits` 特性：
+- 模块级别追踪 tool result 状态（`cachedMCState`）
+- 基于 GrowthBook 配置的 `triggerThreshold` 计数触发
+- 生成 `CacheEditsBlock`，API 层用于**删除**特定 tool result 而**不**使缓存前缀无效
+- **消息不变**——`cache_edits` 在 API 层添加
+- 仅运行于主线程（`isMainThreadSource`）
+- 特性标记：`CACHED_MICROCOMPACT`
+
+### API Microcompaction
+`apiMicrocompact.ts`——服务器端上下文管理配置生成器：
+- `DEFAULT_MAX_INPUT_TOKENS = 180,000`
+- `DEFAULT_TARGET_INPUT_TOKENS = 40,000`
+- 当 thinking 存在时发出 `clear_thinking_20251015` 策略
+- 当 API tool/result 清除启用时发出 `clear_tool_uses_20250919` 策略
+
+### 入口
+`microcompactMessages()`——管线入口：
+1. 时间检查先执行（触发则短路）
+2. Cached MC 路径用于 ant 构建、支持的模型、主线程
+3. 回退到返回不变的消息
+
+**可压缩工具列表**：Read、Bash、Npx、Shell、Grep、Glob、WebSearch、WebFetch、Edit、Write。
+
+---
+
+## 6.15 API 轮组与 Token 计数
+
+**`groupMessagesByApiRound()`**（`grouping.ts`）——按 API 轮边界对消息分组：
+- 当新的 assistant 响应开始时（不同的 `message.id`）触发边界
+- 来自同一 API 响应的流式块共享一个 ID，因此边界只在真正的新轮次触发
+- 被 `truncateHeadForPTLRetry` 使用来逐步丢弃最旧的轮组
+
+**Token 计数**——`tokenCountWithEstimation()` 是上下文大小的**规范函数**：
+- 找到最后一个有真实 API `usage` 数据的 assistant 消息
+- 回溯经过兄弟分割（相同的 `message.id` 用于并行工具调用），包含所有交错的 tool_result
+- 返回：`usageTotal(input + cache + output) + roughEstimate(messagesSinceLastAPI)`
+
+**粗略估计**（`tokenEstimation.ts`）：
+- 文本：`content.length / 4` bytes/token
+- JSON/JSONL/JSONC：`2 bytes/token`
+- 图像/文档：常量 `2000 tokens`
+- `tool_use`：`name + JSON.stringify(input)`
+
+---
+
+## 6.16 PTL 重试与上下文分析
+
+**Prompt-Too-Long 重试**——`truncateHeadForPTLRetry` 处理紧凑请求本身超出上下文窗口的情况：
+1. 按 API 轮组对消息分组
+2. 丢弃最旧的轮组
+3. 重试，直到成功或达到 `MAX_PTL_RETRIES = 3`
+4. 如果所有迭代都失败，返回错误
+
+**上下文分析**——`analyzeContext(messages)` 遍历所有内容块生成 `TokenStats`：
+- 每种工具类型的 token 数（toolRequests、toolResults 映射）
+- 人类 vs assistant 消息 token
+- 按类型的附件计数
+- **重复文件读检测**——追踪相同文件路径的多次读，计算浪费的 token
+- 通过 `tokenStatsToStatsigMetrics()` 转换为 Statsig/指标格式
+
+## 6.17 Post-Compact 清理
+
+`runPostCompactCleanup()` 在压缩后重置：
+- `resetMicrocompactState()`——清除缓存的 MC 状态
+- Context collapse 重置（如果特性启用，仅主线程）
+- `getUserContext.cache.clear()`——使 CLAUDE.md 缓存无效
+- `resetGetMemoryFilesCache('compact')`——重新武装文件观察器
+- `clearSystemPromptSections()`
+- `clearClassifierApprovals()`
+- `clearSpeculativeChecks()`
+- `clearBetaTracingState()`
+- `sweepFileContentCache()`（归因）
+- `clearSessionMessagesCache()`
+
+**故意不重置**——`resetSentSkillNames()`——skill 内容应在压缩后存活。
+
+---
+
+## 6.18 Reactive Mode 与 Context Collapse
+
+**Reactive Mode**——特性标记 `REACTIVE_COMPACT`/GrowthBook `tengu_cobalt_raccoon` 完全禁用主动式自动压缩，转而**等待** API 返回 `prompt-too-long` 错误，然后进行压缩并重试。这节省了正常会话的 API 开销，但代价是每次上下文超长时出现短暂的停顿。
+
+**Context Collapse 模式**——特性标记 `CONTEXT_COLLAPSE` 引入连续摘要管理：不丢弃消息，而是在消息流中维护实时摘要。令牌警告 UI 委托给 `<CollapseLabel>`，显示实时的 `collapsed / total summarized`。
+
+## 6.19 Away Summary
+
+`generateAwaySummary()`——用户返回时生成的摘要：
+- 取最后 30 条消息（`RECENT_MESSAGE_WINDOW = 30`）
+- 使用 session memory 作为额外上下文
+- 使用小型快速模型（Haiku），无工具，无流式
+- 提示："写 1-3 个短句"描述任务和下一步
+
+---

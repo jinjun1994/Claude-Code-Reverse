@@ -369,3 +369,459 @@ const toolResultBlocks = toolUseBlocks.map(block => ({
 ```
 
 这确保了所有 fork 子实例的 API 请求前缀是字节级的相同，共享同一个 cache read。只有最后的 text block 不同（指令不同），这是唯一的 cache miss。
+
+---
+
+## 7.9 Agent 工具池的构建与过滤
+
+**`filterToolsForAgent()`（`agentToolUtils.ts:70-116`）** 决定了每个 Agent 能获得哪些工具：
+
+| 类别 | 禁止工具 | 原因 |
+|------|---------|------|
+| 所有 Agent | `TaskOutput, ExitPlanMode, EnterPlanMode, AskUserQuestion, TaskStop` | 任务系统/计划模式是主线程抽象 |
+| 非 ant 用户 | 额外禁止 `Agent` | 防止嵌套递归 |
+| 自定义 Agents | 额外 `CUSTOM_AGENT_DISALLOWED_TOOLS` | 安全约束 |
+| 异步 Agents | 只允许 `ASYNC_AGENT_ALLOWED_TOOLS` 列表中的工具 | 防止异步递归 |
+
+**Agent 工具池的隔离**——Agent 的工具从 `assembleToolPool()` 获取，使用 Agent 自己的权限模式（`selectedAgent.permissionMode ?? 'acceptEdits'`）。Agent 不受父级的工具限制——完全隔离。
+
+**被禁工具的深层原因**（`constants/tools.ts:90-102`）：
+- `AgentTool`：阻断以防递归
+- `TaskOutputTool`：阻断以防递归
+- `ExitPlanModeTool`：计划模式是主线程抽象
+- `TaskStopTool`：需要访问主线程任务状态
+- `TungstenTool`：使用单例虚拟终端，Agent 之间会冲突
+
+---
+
+## 7.10 AsyncLocalStorage：Agent 上下文隔离
+
+**`agentContext.ts:24-110`** 使用 `AsyncLocalStorage<AgentContext>` 实现 Agent 隔离：
+
+```typescript
+const agentContextStorage = new AsyncLocalStorage<AgentContext>()
+
+// 包装函数执行于 Agent 上下文中
+runWithAgentContext(context, fn)
+```
+
+**为何需要 AsyncLocalStorage**——当 Agents 被后台化（Ctrl+B），多个 Agent 并发运行。`AppState` 是全局单例，会被覆盖。AsyncLocalStorage 保证每个异步执行链有独立的上下文：
+- Agent A 的事件使用 Agent A 的上下文
+- Agent B 的事件使用 Agent B 的上下文
+- 即使两个 Agent 在同一 Node.js 进程
+
+**同步 vs 异步 Agent 的包装**：
+- 同步 Agent：`runWithAgentContext()` 包装整个消息循环
+- 异步 Agent：`void` 触发分离执行，后台生命周期独立于父级
+
+---
+
+## 7.11 安全分类：Agent 返回结果的审计
+
+**`classifyHandoffIfNeeded()`（`agentToolUtils.ts:389-481`）** 在 Agent 完成后、返回父级前执行安全分类：
+
+```
+1. 用 classifyYoloAction() 构建 Agent 动作记录
+2. 分析是否有危险行为（文件删除、网络请求等）
+3. 结果:
+   - Blocked: 在最终消息前添加 "SECURITY WARNING"
+   - Unavailable: 添加 "Note: 安全分类器不可用，请验证"
+   - Allowed: 无修改
+```
+
+这是"信任但验证"模式——Agent 可以执行操作，但完成后需要审计。如果分类器不可用（如模型 API 限流），系统选择降级而非阻断。
+
+---
+
+## 7.12 Agent 的颜色管理
+
+**`agentColorManager.ts`** 管理 8 种主题颜色：
+
+每个 Agent 类型有固定的颜色。这用于：
+- 终端终端状态行的视觉区分
+- 消息气泡的着色
+- 任务列表的标记
+
+颜色是固定的（非动态），确保同一 Agent 类型的视觉一致性。
+
+---
+
+## 7.13 Agent 恢复：从转录重建状态
+
+**`resumeAgent.ts:42-266`** 实现基于转录的 Agent 恢复：
+
+```
+1. getAgentTranscript() 加载持久化转录
+2. readAgentMetadata() 获取 Agent 元数据
+3. 过滤孤儿思考消息、未解决的工具使用、空白 assistant 消息
+4. 重建内容替换状态
+5. 如果是 worktree，验证是否仍然存在（优雅降级）
+6. 作为异步 Agent 恢复，追加新的 prompt 到恢复的消息
+```
+
+**过滤逻辑的意义**——转录中可能有不完整的状态（如在工具调用中间被中断）。`filterIncompleteToolCalls()` 移除 `tool_use` 没有对应 `tool_result` 的消息对，使转录回到一致的状态。
+
+---
+
+## 7.14 Agent Teams：多 Agent 协作架构
+
+**`agentSwarmsEnabled.ts:24-44`** 中 `isAgentSwarmsEnabled()` 是唯一的功能门：
+
+| 条件 | 启用 |
+|------|-----|
+| ant 构建 (`USER_TYPE === 'ant'`) | 始终启用 |
+| 外部构建 | 需要 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` 或 `--agent-teams` 且 GrowthBook `tengu_amber_flint` |
+
+**Team 架构**（参见 `/Lesson/agent-team-architecture.md`）：
+
+```
+Team Leader (主 Agent)
+  ├── TeamCreate / TeamDelete (团队生命周期管理)
+  ├── Shared Task List (TaskCreate/Get/List/Update)
+  ├── SendMessage Mailbox (Agent 间消息)
+  └── Permission Bridge (权限转发)
+```
+
+**Team 成员的权限转发**（`swarmWorkerHandler.ts`）：
+1. 首先尝试分类器自动审批（bash 命令）
+2. 创建权限请求，注册回调，发送到 Leader
+3. Leader 审批/拒绝，响应路由回 worker
+4. Worker 在等待时显示 pending 指示器
+
+**扁平 Team 约束**——`AgentTool.tsx:284-316`：`team_name` 和 `name` 同时提供时通过 `spawnTeammate()` 路由。但"the team roster is flat"——队友不能产生更多队友，只有主 Agent 可以管理团队。
+
+---
+
+## 7.15 Agent 的一次性优化
+
+**`constants.ts:9-12`** 中 `ONE_SHOT_BUILTIN_AGENT_TYPES` 标记了 Explore 和 Plan 为一次性 Agent：
+
+```typescript
+// 一次性 Agent 返回时，跳过同步结果尾部
+// (SendMessage 提示 + agentId + 使用数据)
+// 每次调用节省约 135 字符
+// 全集群规模: 每周 34M Explore 运行 × 135 chars ≈ 4.6GB 网络传输节省
+```
+
+**`AgentTool.tsx:1356`** 的检查：
+```typescript
+if (data.agentType && ONE_SHOT_BUILTIN_AGENT_TYPES.has(data.agentType) && !worktreeInfoText)
+  // 跳过 SendMessage/resume 提示
+```
+
+这是一次典型的大规模优化——单点节省微小，但在全集群规模下显著。
+
+---
+
+## 7.16 确定性 Agent ID
+
+**`agentId.ts`**—Agent ID 格式：`agentName@teamName`
+
+```typescript
+function formatAgentId(agentName: string, teamName: string): string {
+  return `${agentName}@${teamName}`
+}
+```
+
+**Agent 名不能包含 `@`**—它是分隔符。
+
+**目的**：
+1. **可重现性**——相同 Agent 在相同 Team 中总是相同 ID，支持崩溃重连
+2. **人类可读**——ID 有意义，可调试
+3. **可预测**——Team lead 可以计算 teammate 的 ID，无需查找
+
+**Request ID 格式**：`{requestType}-{timestamp}@{agentId}`
+
+例如：`shutdown-1702500000000@researcher@my-project`。
+
+---
+
+## 7.17 Agent 内存快照
+
+`agentMemorySnapshot.ts:198 lines`：
+
+| 作用域 | 路径 | VCS |
+|--------|------|-----|
+| User | `~/.claude/agent-memory/<agentType>/` | 共享 |
+| Project | `<cwd>/.claude/agent-memory/<agentType>/` | 共享 |
+| Local | `<cwd>/.claude/agent-memory-local/<agentType>/` | 不 VCS |
+
+**快照路径**：`<cwd>/.claude/agent-memory-snapshots/<agentType>/snapshot.json`
+
+`checkAgentMemorySnapshot()` 返回三种动作：
+- `'none'`——无操作
+- `'initialize'`——首次使用，从快照复制文件
+- `'prompt-update'`——存在更新的快照
+
+`initializeFromSnapshot()`：从快照复制所有非 `.json` 文件到本地内存。
+
+`replaceFromSnapshot()`：先删除现有 `.md` 文件，然后复制。
+
+`sanitizeAgentTypeForPath()`：用 `-` 替换冒号（用于 `my-plugin:my-agent` 等插件命名空间）。
+
+---
+
+## 7.18 Agent 的模型解决：Bedrock 区域前缀继承
+
+`model/agent.ts:158 lines`：
+
+**解决优先级**：
+1. 环境变量 `CLAUDE_CODE_SUBAGENT_MODEL` 覆盖一切
+2. 工具指定的模型
+3. Agent 的 `model` 字段，默认 `'inherit'`
+4. `'inherit'` → `getRuntimeMainLoopModel()`（父级的模型）
+
+**Bedrock 区域前缀继承**——当使用 Bedrock API 时，父级的跨区域推理前缀（如 `"eu."`、`"us."`）被子 Agent 继承。这在 IAM 权限限定到特定区域时非常重要。如果 Agent 规格已经携带自己的区域前缀，则保留（防止数据驻留违规）。
+
+**aliasMatchesParentTier()**——裸别名（`opus`、`sonnet`、`haiku`）匹配父级模型的层时，子 Agent 继承父级的确切模型字符串，而非提供者默认值。例如：Vertex 用户在 Opus 4.6 上生成 `model: opus` 的子 Agent——应该得 Opus 4.6，而非 `getDefaultOpusModel()` 返回的值。
+
+**扩展别名**（`opus[1m]`、`best`、`opusplan`）不匹配。
+
+---
+
+## 7.19 Agent 工具解析的两阶段
+
+`agentToolUtils.ts:70-225`：
+
+**Phase 1——`filterToolsForAgent()`**——按层过滤：
+1. MCP 工具（`mcp__*`）始终允许
+2. `ALL_AGENT_DISALLOWED_TOOLS` 禁止所有 Agent
+3. `CUSTOM_AGENT_DISALLOWED_TOOLS` 禁止非内置 Agent
+4. `ASYNC_AGENT_ALLOWED_TOOLS` 是异步 Agent 的白名单
+
+**Phase 2——`resolveAgentTools()`**：
+- 支持通配符 `tools: ['*']`——返回过滤后的所有可用工具
+- 支持显式白名单：解析每个 `toolSpec` 如 `"Read:*.md"`
+- 特例：`Agent(worker,researcher)` 从冒号后的规则内容提取 `allowedAgentTypes`
+- `isMainThread` 标志跳过过滤
+
+---
+
+## 7.20 Agent 颜色管理的范围
+
+`agentColorManager.ts:66 lines`：
+
+8 种颜色：`red, blue, green, yellow, purple, orange, pink, cyan`。
+
+**主题键映射**——每个 Agent 颜色映射到带有 `_FOR_SUBAGENTS_ONLY` 后缀的主题键。这确保主题定义被作用域化——不会污染其他用途的 red/blue/etc. 主题颜色。
+
+General-purpose Agent 获 `undefined`（无颜色）。颜色在 `loadAgentsDir.ts:368-372` 的 `getAgentDefinitionsWithOverrides()` 中分配。
+
+---
+
+## 7.21 Agent 任务追踪与通知
+
+`LocalAgentTask.tsx:500+ lines`：
+
+**进度追踪**——`createProgressTracker()` 初始化计数器，`updateProgressFromMessage()` 处理每个 assistant 消息，累积 toolUseCount、token 计数和 recentActivities（最大 5，FIFO）。
+
+**通知**——`enqueueAgentNotification()` 是原子的——检查并设置 `notified` 标志防止重复。构建 `<task_notification>` XML 块：taskId、outputFile、status、summary、结果内容、使用统计和 worktree 信息。
+
+**Kill 机制**——调用 `task.abortController.abort()`，设置 `status: 'killed'`，调用 `evictTaskOutput()` 清理磁盘文件。
+
+**磁盘输出**——Async Agent 的输出文件初始化为 symlink，指向持久化位置。
+
+**Token 追踪**——`ProgressTracker` 分别追踪 input/output token，避免双倍计数（API 的 `input_tokens` 是每轮累积的，`output_tokens` 是每轮的）。
+
+---
+
+---
+
+## 7.22 Mailbox 通信系统
+
+`teammateMailbox.ts`（1184 行）——swarm 中 Agent 间的通信协议：
+
+**物理存储**：
+- 收件箱：`~/.claude/teams/{team_name}/inboxes/{agent_name}.json`
+- 锁：`${inboxPath}.lock` 使用 `proper-lockfile`
+- 锁重试：10 次，退避 5-100ms
+
+**消息结构**：
+```typescript
+type TeammateMessage = {
+  from: string
+  text: string
+  timestamp: string
+  read: boolean
+  color?: string
+  summary?: string  // 5-10 词预览
+}
+```
+
+**API 函数**：
+| 函数 | 用途 |
+|------|------|
+| `readMailbox()` | 读取所有消息 |
+| `readUnreadMessages()` | 仅未读消息 |
+| `writeToMailbox()` | 使用文件锁写入 |
+| `markMessageAsReadByIndex()` | 按索引标记已读 |
+| `markMessagesAsReadByPredicate()` | 按谓词选择性标记 |
+| `clearMailbox()` | 重置为空 |
+
+**结构化协议类型**（JSON 文本字段中）：
+1. `idle_notification`——teammate 变为空闲（Stop hook 触发）
+2. `permission_request` → `permission_response`——权限转发
+3. `sandbox_permission_request` → `sandbox_permission_response`——沙箱网络访问
+4. `shutdown_request` → `shutdown_approved/rejected`——优雅关闭
+5. `plan_approval_request` → `plan_approval_response`——plan 模式批准
+6. `task_assignment`——任务分配通知
+7. `team_permission_update`——广播权限变更
+8. `mode_set_request`——改变权限模式
+
+`isStructuredProtocolMessage()` 识别 10 种应由 `useInboxPoller` 路由的消息类型，而非作为原始 LLM 上下文消费。
+
+---
+
+## 7.23 权限同步
+
+`permissionSync.ts`（929 行）——双重系统：
+
+**文件版（遗留）**——`~/.claude/teams/{teamName}/permissions/pending/{id}.json` 和 `resolved/{id}.json`：
+- `writePermissionRequest(request)`——带目录锁写入 pending
+- `readPendingPermissions(teamName?)`——读取所有 pending
+- `resolvePermission(requestId, resolution)`——pending 移动到 resolved
+- `cleanupOldResolutions()`——每小时清理，`maxAgeMs=3600000`
+
+**Mailbox 版（当前）**——使用 `writeToMailbox()` 发送结构化 JSON：
+- `sendPermissionRequestViaMailbox(request)`——发送到 leader 的收件箱
+- `sendPermissionResponseViaMailbox(workerName, resolution, requestId)`
+- `sendSandboxPermissionRequestViaMailbox(host, requestId, teamName?)`
+
+**Swarm Worker 权限处理器**（`swarmWorkerHandler.ts`，160 行）：
+1. 先对 bash 命令尝试分类器自动批准
+2. 如分类器不批准，通过 mailbox 转发给 leader
+3. **在发送请求前**注册回调（防止竞争条件）
+4. 显示 pending 指示器（`pendingWorkerRequest`）
+5. `new Promise<PermissionDecision>` 等待，带 abort 信号监听
+
+---
+
+## 7.24 Agent Resume 系统
+
+`resumeAgent.ts`（266 行）——崩溃重连的 agent 恢复：
+
+**`resumeAgentBackground()` 流程**：
+1. 通过 `getAgentTranscript(agentId)` 和 `readAgentMetadata(agentId)` 加载转录和元数据
+2. 过滤消息：`filterWhitespaceOnlyAssistantMessages` → `filterOrphanedThinkingOnlyMessages` → `filterUnresolvedToolUses`
+3. 从转录的 replacements 重建 `contentReplacementState`
+4. 验证 worktree 路径存在（如已删除则回退到父级 cwd）
+5. 增加 worktree 的 mtime 防止陈旧 worktree 清理
+6. 路由 agent：如为 `FORK_AGENT.agentType` 使用 fork agent 定义；否则从 activeAgents 查找
+7. 重建系统提示用于 fork resume（如未缓存则重新调用 `getSystemPrompt()`）
+8. 注册为异步 agent，启动生命周期
+
+**同步 Agent 错误恢复**——如果迭代期间出错：
+- 检查是否有任何 assistant 消息存在
+- 如无消息，重新抛出到工具框架
+- 如有部分消息，调用 `finalizeAgentTool()` 允许部分进度返回
+
+---
+
+## 7.25 Fork Subagent 字节级缓存复制
+
+**`buildForkedMessages()`**（`forkSubagent.ts`，107-169 行）实现字节级复制的缓存前缀：
+
+```
+[...history, assistant(all_tool_uses), user(placeholder_results..., directive)]
+```
+
+**关键设计**：
+- 克隆父级 assistant 消息（所有 tool_use 块）
+- 用**相同占位符**构建 `tool_result` 块：`"Fork started — processing in background"`
+- 在所有 tool_result 后追加每个子级的指令文本块
+- 结果：**仅最后的文本块不同**——所有子级共享完全相同的 prompt 缓存
+
+**Recursive Fork Guard**（`isInForkChild()`）：
+- 扫描用户消息检查 `<fork_boilerplate>` 标签文本
+- 同时检查 `toolUseContext.options.querySource === 'agent:builtin:fork'`（抗压缩——在 spawn 时在 context.options 设置）
+- 如 querySource 检查失败则回退到消息扫描（autocompact 可能通过替换 fork-boilerplate 消息击败 querySource）
+
+**Fork Prompt 指导**（关键摘录）：
+- "Forks 很便宜，因为它们共享你的 prompt 缓存。不要在 fork 上设置 model"
+- "Don't peek. 工具结果包含 outputFile 路径——不要 Read 或 tail 它"
+- "Don't race. 启动后，你对 fork 发现的内容一无所知"
+
+---
+
+## 7.26 多 Agent 生成架构
+
+`spawnMultiAgent.ts`（1094 行）——三种生成路径：
+
+**路径 1：`handleSpawnInProcess()`**——同一 Node.js 进程通过 AsyncLocalStorage
+
+**路径 2：`handleSpawnSplitPane()`**——tmux 分割窗口或 iTerm2 分割面板
+
+**路径 3：`handleSpawnSeparateWindow()`**——swarm 会话中的独立 tmux 窗口
+
+**后端检测与回退**（行 1040-1078）：
+- 如 `isInProcessEnabled()`：直接进程内路径
+- 否则：`detectAndGetBackend()`——如 auto 模式无可用后端，回退到进程内
+- 无 it2 CLI 的 iTerm2 显示 `It2SetupPrompt` React 组件并等待用户决策
+
+**Teammate 命令构建**：
+- 二进制路径：原生构建使用 `process.execPath`，否则 `process.argv[1]` 或环境变量 `TEAMMATE_COMMAND_ENV_VAR`
+- CLI 参数：`--agent-id`、`--agent-name`、`--team-name`、`--agent-color`、`--parent-session-id`
+- 传播的标志：`--dangerously-skip-permissions`、`--permission-mode`、`--model`、`--settings`
+- 环境：`buildInheritedEnvVars()` 传播 CLAUDECODE、API 提供者变量
+
+**Team 文件结构**（`teamHelpers.ts`，684 行）：
+```typescript
+type TeamFile = {
+  name: string
+  leadAgentId: string
+  leadSessionId?: string
+  members: Array<{
+    agentId: string
+    name: string
+    color?: string
+    sessionId?: string
+    tmuxPaneId: string
+    backendType?: BackendType  // 'in-process' | 'tmux' | 'it2'
+    isActive?: boolean
+    mode?: PermissionMode
+  }>
+}
+```
+
+路径：`~/.claude/teams/{sanitized-team-name}/config.json`
+
+---
+
+## 7.27 Agent Claude.md 省略优化
+
+`runAgent.ts` 中的优化：
+
+**Claude.md 省略**（`tengu_slim_subagent_claudemd` 门控）：
+- Explore/Plan agent 从用户上下文中省略 `claudeMd`
+- 每次节省 5-15 Gtok/周（34M+ Explore spawns）
+
+**gitStatus 省略**——Explore/Plan agent 省略过时的 `gitStatus`（最大 40KB）：
+- 如需要 git 信息，它们自行运行 `git status`
+
+**Agent 列表注入优化**（`shouldInjectAgentListInMessages()`）：
+- 动态 agent 列表约占舰队 10.2% 的 cache_creation token
+- 可通过 `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` 环境变量强制启用/禁用
+
+---
+
+## 7.28 Agent 超时与清理
+
+**无显式 agent 超时**——Agent 运行直到完成、中止或错误。
+
+**超时机制汇总表**：
+
+| 机制 | 超时值 | 用途 |
+|------|--------|------|
+| AbortController | 无超时 | 同步/异步 agent 各有独立 AbortController |
+| MCP Server 等待 | 30 秒（500ms 轮询） | 所需 MCP 服务器 pending 时等待 |
+| 迭代器清理超时 | 1000ms | 同步 agent 后台化时的前景迭代器清理 |
+| Mailbox 锁重试 | 10 次，退避 5-100ms | 文件锁获取 |
+| Idle Notification Stop hook | 10000ms | teammate 空闲通知 |
+
+**迭代器清理**——当同步 agent 后台化时：
+```typescript
+Promise.race([agentIterator.return(undefined), sleep(1000)])
+```
+1 秒超时防止无限挂起。
+
+---
